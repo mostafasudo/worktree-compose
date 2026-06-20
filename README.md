@@ -14,6 +14,8 @@ Every worktree gets its own ports, database, cache, and containers — **automat
 
 <img src="https://raw.githubusercontent.com/LevwTech/worktree-compose/main/wtc-explainer.gif" alt="worktree-compose demo — isolated Docker stacks per git worktree" width="820" />
 
+<em>The full <code>wtc</code> workflow: an isolated Docker stack per worktree, several AI agents building in parallel, compared live on their own ports — then promote the winner.</em>
+
 </div>
 
 ```bash
@@ -34,9 +36,28 @@ npx wtc list
 └───────┴───────────────┴────────┴────────────────────────┴─────────────────────────────────────────────────────────┘
 ```
 
+## Contents
+
+- [Why wtc?](#why-wtc)
+- [How is this different from `docker compose -p`?](#how-is-this-different-from-docker-compose--p)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Preparing your docker-compose.yml](#preparing-your-docker-composeyml)
+- [How It Works](#how-it-works)
+- [Commands](#commands)
+- [Configuration (Optional)](#configuration-optional)
+- [MCP Server](#mcp-server)
+- [Full Example](#full-example)
+- [Requirements](#requirements)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Why wtc?
 
-Spin up multiple developers or AI agents on the same repo — each in its own [git worktree](https://git-scm.com/docs/git-worktree) — and they'll fight over the same Docker Compose setup: port conflicts, a shared database, a shared cache, colliding containers. `wtc` makes every worktree a fully isolated, side-by-side environment with **zero configuration**.
+Spin up multiple developers or AI agents on the same repo — each in its own [git worktree](https://git-scm.com/docs/git-worktree) — and they immediately fight over a single Docker Compose setup: port conflicts, a shared database, a shared cache, colliding containers. You can't run two stacks side by side.
+
+`wtc` reads your existing `docker-compose.yml` and turns every worktree into a fully isolated, side-by-side environment — unique host ports, separate containers, networks, and volumes — with **zero configuration**.
 
 - ⚡ **Zero config** — reads your existing `docker-compose.yml`, no new files required
 - 🔌 **Automatic ports** — unique, collision-free host ports per worktree
@@ -44,6 +65,36 @@ Spin up multiple developers or AI agents on the same repo — each in its own [g
 - 🧪 **True side-by-side** — run `N` stacks at once and compare them in the browser
 - 🔄 **One-command promote** — pull a worktree's changes back into your branch
 - 🤖 **Built-in MCP server** — let AI agents start, stop, and manage their own stacks
+
+<table>
+<tr><th>Without <code>wtc</code></th><th>With <code>wtc</code></th></tr>
+<tr><td>
+
+```bash
+git worktree add ../app-feat feat
+# hand-pick non-colliding host ports
+# edit ../app-feat/.env per service
+# copy compose file + Dockerfiles over
+docker compose -p app-feat up -d --build
+# ...remember to tear it all down later
+```
+
+</td><td>
+
+```bash
+git worktree add ../app-feat feat
+wtc start
+
+# ...and when you're done:
+wtc clean
+```
+
+</td></tr>
+</table>
+
+## How is this different from `docker compose -p`?
+
+`docker compose -p` only namespaces the project. You'd still hand-pick free host ports, hand-edit each worktree's `.env`, copy infra files in, and tear everything down yourself. `wtc` builds on that same project-name isolation and automates the rest: collision-free **port allocation**, per-worktree **`.env` injection**, infra-file **sync**, one-command **`promote`**, and a built-in **MCP server** so AI agents can drive it all themselves.
 
 ## Quick Start
 
@@ -60,20 +111,6 @@ npx wtc start
 # 4. See everything that's running
 npx wtc list
 ```
-
-## Table of Contents
-
-- [Usage](#usage)
-- [The Problem](#the-problem)
-- [The Solution](#the-solution)
-- [Preparing Your docker-compose.yml](#preparing-your-docker-composeyml)
-- [How It Works](#how-it-works)
-- [Commands](#commands)
-- [Configuration (Optional)](#configuration-optional)
-- [MCP Server](#mcp-server)
-- [Full Example](#full-example)
-- [Requirements](#requirements)
-- [Troubleshooting](#troubleshooting)
 
 ## Usage
 
@@ -102,15 +139,7 @@ npx wtc promote 1
 npx wtc clean
 ```
 
-## The Problem
-
-Multiple developers or AI agents working in parallel on the same repo — each in a [git worktree](https://git-scm.com/docs/git-worktree) — share the same Docker Compose setup. This means port conflicts, shared databases, shared caches, and container collisions. You can't run two stacks side by side.
-
-## The Solution
-
-`wtc` reads your `docker-compose.yml`, finds every service that exposes a port via `${VAR:-default}`, assigns unique ports per worktree, injects them into each worktree's `.env`, and starts isolated containers. No configuration needed.
-
-## Preparing Your docker-compose.yml
+## Preparing your docker-compose.yml
 
 For `wtc` to isolate a service's port, the host port must use the `${VAR:-default}` pattern:
 
@@ -169,13 +198,15 @@ Each worktree N gets unique ports: `20000 + default_port + worktree_index`
 | backend  | 8000          | 28001      | 28002      | 28003      |
 | frontend | 5173          | 25174      | 25175      | 25176      |
 
+The table is illustrative — every value follows the formula above. (If an allocation would exceed `65535`, `wtc` falls back to `default_port + 100 × index`.)
+
 ### Container Isolation
 
-Each worktree gets its own `COMPOSE_PROJECT_NAME`: `{repo}-wt-{index}-{branch}`. This means separate containers, networks, and volumes. Nothing is shared.
+Each worktree gets its own `COMPOSE_PROJECT_NAME` — `{repo}-wt-{index}-{branch}`, lowercased and sanitized to a Docker-safe name. That means separate containers, networks, and volumes. Nothing is shared.
 
 ### File Sync
 
-Before starting, `wtc` copies infrastructure files from main into the worktree: the compose file, every Dockerfile referenced in `build.dockerfile`, and `.env`. This ensures the worktree always has the latest Docker setup.
+Before starting, `wtc` copies infrastructure files from main into each worktree: the compose file, every Dockerfile referenced by a service's `build`, and your base `.env` (falling back to `.env.example`, or an empty file if neither exists). This keeps every worktree on the latest Docker setup.
 
 ### Env Injection
 
@@ -191,6 +222,8 @@ BACKEND_PORT=28001
 FRONTEND_PORT=25174
 # --- end wtc ---
 ```
+
+Re-running `wtc start` strips and rewrites this block, so it never accumulates.
 
 ## Commands
 
@@ -231,7 +264,7 @@ npx wtc list
 
 ### `wtc promote <index>`
 
-Copy changed files from a worktree into your current branch as uncommitted changes. Automatically excludes `.env` and compose files. Aborts if it would overwrite uncommitted local changes.
+Copy a worktree's changed files — added, modified, and deleted — into your current branch as uncommitted changes. Skips `.env` and compose files, and aborts if any file it would touch has uncommitted local changes.
 
 ```bash
 npx wtc promote 1
@@ -258,7 +291,7 @@ npx wtc clean
 }
 ```
 
-Or use a `"wtc"` key in `package.json`.
+Or use a `"wtc"` key in `package.json`. (`.wtcrc.json` takes precedence.)
 
 ### `sync`
 
@@ -352,6 +385,12 @@ npx wtc clean
 
 **Stale containers** — Run `wtc clean`, or manually: `docker ps -a --filter "name=-wt-" -q | xargs docker rm -f`
 
+## Contributing
+
+Issues and pull requests are welcome. Found a bug or have an idea? [Open an issue](https://github.com/LevwTech/worktree-compose/issues) — and if `wtc` saves you time, a ⭐ on the [repo](https://github.com/LevwTech/worktree-compose) helps others find it.
+
 ## License
 
 [MIT](./LICENSE)
+</content>
+</invoke>
