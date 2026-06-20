@@ -12,7 +12,7 @@ Every worktree gets its own ports, database, cache, and containers — **automat
 [![license](https://img.shields.io/npm/l/worktree-compose?color=blue)](./LICENSE)
 [![DevHunt](https://img.shields.io/badge/DevHunt-%231%20Product%20of%20the%20Week-ff6154)](https://devhunt.org/tool/worktree-compose)
 
-<img src="https://raw.githubusercontent.com/LevwTech/worktree-compose/main/wtc-explainer.gif" alt="worktree-compose demo — isolated Docker stacks per git worktree" width="820" />
+<img src="https://raw.githubusercontent.com/mostafasudo/worktree-compose/main/wtc-explainer.gif" alt="worktree-compose demo — isolated Docker stacks per git worktree" width="820" />
 
 <em>The full <code>wtc</code> workflow: an isolated Docker stack per worktree, several AI agents building in parallel, compared live on their own ports — then promote the winner.</em>
 
@@ -387,7 +387,7 @@ npx wtc clean
 
 ## Contributing
 
-Issues and pull requests are welcome. Found a bug or have an idea? [Open an issue](https://github.com/LevwTech/worktree-compose/issues) — and if `wtc` saves you time, a ⭐ on the [repo](https://github.com/LevwTech/worktree-compose) helps others find it.
+Issues and pull requests are welcome. Found a bug or have an idea? [Open an issue](https://github.com/mostafasudo/worktree-compose/issues) — and if `wtc` saves you time, a ⭐ on the [repo](https://github.com/mostafasudo/worktree-compose) helps others find it.
 
 ## License
 

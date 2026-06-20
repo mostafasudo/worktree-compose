@@ -31,12 +31,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LevwTech/worktree-compose.git"
+    "url": "git+https://github.com/mostafasudo/worktree-compose.git"
   },
   "bugs": {
-    "url": "https://github.com/LevwTech/worktree-compose/issues"
+    "url": "https://github.com/mostafasudo/worktree-compose/issues"
   },
-  "homepage": "https://github.com/LevwTech/worktree-compose#readme",
+  "homepage": "https://github.com/mostafasudo/worktree-compose#readme",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
