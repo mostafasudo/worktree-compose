@@ -1,14 +1,20 @@
-# worktree-compose (wtc)
+<div align="center">
 
-[![npm](https://img.shields.io/npm/v/worktree-compose?label=npm)](https://www.npmjs.com/package/worktree-compose)
+# worktree-compose · `wtc`
 
-Zero-config Docker Compose isolation for git worktrees.
+### Zero-config Docker Compose isolation for git worktrees
 
-Every worktree gets its own ports, database, cache, and containers — automatically. [#1 DevHunt Product of the week](https://devhunt.org/tool/worktree-compose)
+Every worktree gets its own ports, database, cache, and containers — **automatically**.
 
+[![npm version](https://img.shields.io/npm/v/worktree-compose?label=npm&color=cb3837&logo=npm)](https://www.npmjs.com/package/worktree-compose)
+[![downloads](https://img.shields.io/npm/dm/worktree-compose?color=cb3837)](https://www.npmjs.com/package/worktree-compose)
+[![node](https://img.shields.io/node/v/worktree-compose?color=339933&logo=node.js&logoColor=white)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/worktree-compose?color=blue)](./LICENSE)
+[![DevHunt](https://img.shields.io/badge/DevHunt-%231%20Product%20of%20the%20Week-ff6154)](https://devhunt.org/tool/worktree-compose)
 
-https://github.com/user-attachments/assets/fe05a2ff-954b-4e4f-b01b-ad17f1233abf
+<img src="https://raw.githubusercontent.com/LevwTech/worktree-compose/main/wtc-explainer.gif" alt="worktree-compose demo — isolated Docker stacks per git worktree" width="820" />
 
+</div>
 
 ```bash
 npm install -D worktree-compose
@@ -27,6 +33,47 @@ npx wtc list
 │ 2     │ fix-billing   │ down   │ http://localhost:25175 │ postgres:25436 redis:26382 backend:28002 frontend:25175 │
 └───────┴───────────────┴────────┴────────────────────────┴─────────────────────────────────────────────────────────┘
 ```
+
+## Why wtc?
+
+Spin up multiple developers or AI agents on the same repo — each in its own [git worktree](https://git-scm.com/docs/git-worktree) — and they'll fight over the same Docker Compose setup: port conflicts, a shared database, a shared cache, colliding containers. `wtc` makes every worktree a fully isolated, side-by-side environment with **zero configuration**.
+
+- ⚡ **Zero config** — reads your existing `docker-compose.yml`, no new files required
+- 🔌 **Automatic ports** — unique, collision-free host ports per worktree
+- 📦 **Full isolation** — separate containers, networks, and volumes for each stack
+- 🧪 **True side-by-side** — run `N` stacks at once and compare them in the browser
+- 🔄 **One-command promote** — pull a worktree's changes back into your branch
+- 🤖 **Built-in MCP server** — let AI agents start, stop, and manage their own stacks
+
+## Quick Start
+
+```bash
+# 1. Install
+npm install -D worktree-compose
+
+# 2. Create a worktree for some parallel work
+git worktree add ../myapp-feature feature-branch
+
+# 3. Boot an isolated stack for it
+npx wtc start
+
+# 4. See everything that's running
+npx wtc list
+```
+
+## Table of Contents
+
+- [Usage](#usage)
+- [The Problem](#the-problem)
+- [The Solution](#the-solution)
+- [Preparing Your docker-compose.yml](#preparing-your-docker-composeyml)
+- [How It Works](#how-it-works)
+- [Commands](#commands)
+- [Configuration (Optional)](#configuration-optional)
+- [MCP Server](#mcp-server)
+- [Full Example](#full-example)
+- [Requirements](#requirements)
+- [Troubleshooting](#troubleshooting)
 
 ## Usage
 
@@ -307,4 +354,4 @@ npx wtc clean
 
 ## License
 
-MIT
+[MIT](./LICENSE)
