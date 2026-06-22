@@ -25,7 +25,7 @@ function copyDir(src: string, dst: string): void {
 
 /** True if a repo-relative path escapes the repo root (or is absolute). */
 function escapesRepo(rel: string): boolean {
-  return rel.startsWith("..") || path.isAbsolute(rel);
+  return path.isAbsolute(rel) || rel === ".." || rel.startsWith(`..${path.sep}`);
 }
 
 export function getDockerfiles(

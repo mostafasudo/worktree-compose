@@ -52,14 +52,21 @@ function parseServicesObject(
     return [];
   }
 
-  const servicesObj = doc.services as Record<string, Record<string, unknown>>;
-  return Object.entries(servicesObj).map(([name, svc]) => ({
-    name,
-    ports: parseServicePorts(svc.ports),
-    build: parseServiceBuild(svc.build),
-    envFile: parseEnvFile(svc.env_file),
-    sourcePath,
-  }));
+  const servicesObj = doc.services as Record<
+    string,
+    Record<string, unknown> | null
+  >;
+  return Object.entries(servicesObj).map(([name, svc]) => {
+    // An empty service definition (`foo:` with no body) parses to null.
+    const s = svc ?? {};
+    return {
+      name,
+      ports: parseServicePorts(s.ports),
+      build: parseServiceBuild(s.build),
+      envFile: parseEnvFile(s.env_file),
+      sourcePath,
+    };
+  });
 }
 
 /**

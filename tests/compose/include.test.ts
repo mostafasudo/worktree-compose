@@ -96,13 +96,43 @@ describe("parseComposeFile with include:", () => {
     // The external service is still discovered for remapping...
     expect(result.services.map((s) => s.name).sort()).toEqual(["ext", "web"]);
 
-    const wtPath = path.join(tmpDir, "wt");
+    // Worktree lives under repoRoot so an escaping write would land in a
+    // sibling we can detect, rather than silently overwriting the original.
+    const wtPath = path.join(repoRoot, ".wt");
     syncWorktreeFiles(repoRoot, wtPath, result);
 
     // ...but its file is not copied anywhere (and nothing escapes the worktree).
     expect(fs.existsSync(path.join(wtPath, "compose.yml"))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, "wt", "..", "outside", "compose.yml")))
-      .toBe(true); // the original, untouched
+    expect(fs.existsSync(path.join(repoRoot, "outside", "compose.yml"))).toBe(
+      false,
+    );
     expect(fs.readdirSync(wtPath)).toEqual(["compose.yml"]);
+  });
+
+  it("parses include entries whose path is a list", () => {
+    write(tmpDir, "a.yml", "services:\n  a:\n    image: a\n");
+    write(tmpDir, "b.yml", "services:\n  b:\n    image: b\n");
+    write(
+      tmpDir,
+      "root.yml",
+      "include:\n  - path:\n      - ./a.yml\n      - ./b.yml\n",
+    );
+
+    const result = parseComposeFile(path.join(tmpDir, "root.yml"));
+    expect(result.services.map((s) => s.name).sort()).toEqual(["a", "b"]);
+    expect(result.sourceFiles).toHaveLength(3);
+  });
+
+  it("tolerates empty (null) service definitions", () => {
+    write(
+      tmpDir,
+      "root.yml",
+      "services:\n  web:\n    image: web\n  worker:\n",
+    );
+
+    const result = parseComposeFile(path.join(tmpDir, "root.yml"));
+    const worker = result.services.find((s) => s.name === "worker")!;
+    expect(worker.ports).toEqual([]);
+    expect(worker.build).toBeUndefined();
   });
 });
