@@ -185,6 +185,18 @@ If `wtc` finds hardcoded ports, it warns you and suggests the fix:
   protocol: tcp
 ```
 
+### Included compose files
+
+If your compose file pulls in others via the top-level [`include:`](https://docs.docker.com/reference/compose-file/include/) directive, `wtc` follows them recursively — services defined in included files get the same port isolation as top-level ones, and the included files are copied into each worktree alongside the main one.
+
+```yaml
+include:
+  - ./db/compose.yml
+  - path: ./services/api/compose.yml
+```
+
+Build contexts in an included file resolve relative to that file's own directory, just as Docker Compose does. (Included files that live outside the repo still have their ports isolated, but aren't copied into the worktree.)
+
 ## How It Works
 
 ### Port Allocation
@@ -206,7 +218,7 @@ Each worktree gets its own `COMPOSE_PROJECT_NAME` — `{repo}-wt-{index}-{branch
 
 ### File Sync
 
-Before starting, `wtc` copies infrastructure files from main into each worktree: the compose file, every Dockerfile referenced by a service's `build`, and your base `.env` (falling back to `.env.example`, or an empty file if neither exists). This keeps every worktree on the latest Docker setup.
+Before starting, `wtc` copies infrastructure files from main into each worktree: the compose file (plus any files it pulls in via `include:`), every Dockerfile referenced by a service's `build`, and your base `.env` (falling back to `.env.example`, or an empty file if neither exists). This keeps every worktree on the latest Docker setup.
 
 ### Env Injection
 

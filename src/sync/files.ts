@@ -23,7 +23,12 @@ function copyDir(src: string, dst: string): void {
   }
 }
 
-function getDockerfiles(
+/** True if a repo-relative path escapes the repo root (or is absolute). */
+function escapesRepo(rel: string): boolean {
+  return rel.startsWith("..") || path.isAbsolute(rel);
+}
+
+export function getDockerfiles(
   composeFile: ComposeFile,
   repoRoot: string,
 ): string[] {
@@ -33,9 +38,12 @@ function getDockerfiles(
     if (!svc.build) continue;
     const context = svc.build.context ?? ".";
     const dockerfile = svc.build.dockerfile ?? "Dockerfile";
-    const resolvedDir = path.resolve(path.dirname(composeFile.composePath), context);
+    // Build contexts are relative to the file that declared the service, which
+    // may be an included file rather than the root compose file.
+    const resolvedDir = path.resolve(path.dirname(svc.sourcePath), context);
     const fullPath = path.join(resolvedDir, dockerfile);
     const rel = path.relative(repoRoot, fullPath);
+    if (escapesRepo(rel)) continue;
     files.push(rel);
   }
 
@@ -48,11 +56,11 @@ export function syncWorktreeFiles(
   composeFile: ComposeFile,
   extraSync?: string[],
 ): void {
-  const composeRel = path.relative(repoRoot, composeFile.composePath);
-  copyFile(
-    path.join(repoRoot, composeRel),
-    path.join(wtPath, composeRel),
-  );
+  for (const src of composeFile.sourceFiles) {
+    const rel = path.relative(repoRoot, src);
+    if (escapesRepo(rel)) continue;
+    copyFile(path.join(repoRoot, rel), path.join(wtPath, rel));
+  }
 
   for (const df of getDockerfiles(composeFile, repoRoot)) {
     copyFile(path.join(repoRoot, df), path.join(wtPath, df));

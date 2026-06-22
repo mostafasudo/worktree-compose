@@ -1,0 +1,10 @@
+include:
+  - ../shared/compose.yml
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "${API_PORT:-8000}:8000"
