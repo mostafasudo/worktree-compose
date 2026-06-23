@@ -107,8 +107,14 @@ export function recommendPortStride(
 ): number {
   const horizon = Math.max(worktreeCount, 100);
   for (let s = 1; s <= STRIDE_SEARCH_CAP; s++) {
-    if (detectCrossWorktreeCollisions(mappings, s, horizon).length === 0) {
-      return s;
+    try {
+      if (detectCrossWorktreeCollisions(mappings, s, horizon).length === 0) {
+        return s;
+      }
+    } catch {
+      // This stride overflows the valid range at the chosen horizon; it could
+      // not be used safely anyway, so skip it and try the next one.
+      continue;
     }
   }
   return -1;

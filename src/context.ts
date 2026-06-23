@@ -5,6 +5,7 @@ import {
   detectCrossWorktreeCollisions,
   recommendPortStride,
 } from "./ports/allocate.js";
+import type { PortCollision } from "./ports/allocate.js";
 import { loadConfig } from "./config.js";
 import { getNonMainWorktrees } from "./git/worktree.js";
 import * as log from "./utils/log.js";
@@ -38,6 +39,11 @@ export function buildContext(): WtcContext {
   const portMappings = extractPortMappings(composeFile.services);
   const config = loadConfig(repoRoot);
   const portStride = config.portStride ?? 1;
+  if (!Number.isInteger(portStride) || portStride < 1) {
+    throw new Error(
+      `Invalid "portStride": ${String(portStride)}. Expected a positive integer.`,
+    );
+  }
   const worktrees = getNonMainWorktrees(repoRoot);
 
   warnOnPortCollisions(portMappings, portStride, worktrees.length);
@@ -60,11 +66,18 @@ function warnOnPortCollisions(
 ): void {
   if (worktreeCount < 2) return;
 
-  const collisions = detectCrossWorktreeCollisions(
-    portMappings,
-    portStride,
-    worktreeCount,
-  );
+  // Collision detection is advisory; an allocation failure here must never
+  // abort the command that triggered the warning.
+  let collisions: PortCollision[];
+  try {
+    collisions = detectCrossWorktreeCollisions(
+      portMappings,
+      portStride,
+      worktreeCount,
+    );
+  } catch {
+    return;
+  }
   if (collisions.length === 0) return;
 
   const examples = collisions

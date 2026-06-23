@@ -133,4 +133,20 @@ describe("cross-worktree collision detection", () => {
     expect(stride).toBeGreaterThan(1);
     expect(detectCrossWorktreeCollisions(clustered, stride, 100)).toEqual([]);
   });
+
+  it("does not throw when allocations overflow during the search", () => {
+    // A very high default port forces allocatePort out of range deep in the
+    // horizon; recommendPortStride must stay non-fatal and report -1.
+    const highPort: PortMapping[] = [
+      {
+        serviceName: "huge",
+        envVar: "HUGE_PORT",
+        defaultPort: 60000,
+        containerPort: 60000,
+        raw: "${HUGE_PORT:-60000}:60000",
+      },
+    ];
+    expect(() => recommendPortStride(highPort, 2)).not.toThrow();
+    expect(recommendPortStride(highPort, 2)).toBe(-1);
+  });
 });
