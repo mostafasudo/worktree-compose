@@ -22,7 +22,11 @@ export function startCommand(indices: number[]): void {
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
     const project = composeProjectName(ctx.repoName, idx, wt.branch);
-    const allocations = allocateWorktreePorts(ctx.portMappings, idx);
+    const allocations = allocateWorktreePorts(
+      ctx.portMappings,
+      idx,
+      ctx.portStride,
+    );
 
     log.header(`Worktree ${idx}: ${wt.branch}`);
     log.info(`Path:    ${wt.path}`);

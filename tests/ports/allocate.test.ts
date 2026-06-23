@@ -1,6 +1,8 @@
 import {
   allocatePort,
   allocateWorktreePorts,
+  detectCrossWorktreeCollisions,
+  recommendPortStride,
 } from "../../src/ports/allocate.js";
 import type { PortMapping } from "../../src/ports/types.js";
 
@@ -18,6 +20,14 @@ describe("allocatePort", () => {
 
   it("throws for impossible ports", () => {
     expect(() => allocatePort(60000, 100)).toThrow(/out of valid range/);
+  });
+
+  it("honours a custom portStride", () => {
+    expect(allocatePort(8000, 2, 100)).toBe(28200);
+    expect(allocatePort(8081, 1, 100)).toBe(28181);
+    expect(allocatePort(8081, 2, 100)).toBe(28281);
+    // stride defaults to 1 (current behaviour)
+    expect(allocatePort(8000, 2)).toBe(28002);
   });
 });
 
@@ -75,5 +85,52 @@ describe("allocateWorktreePorts", () => {
 
     expect(r1[0].port).not.toBe(r2[0].port);
     expect(r1[1].port).not.toBe(r2[1].port);
+  });
+
+  it("applies the portStride to each worktree index", () => {
+    const r1 = allocateWorktreePorts(mappings, 1, 100);
+    const r2 = allocateWorktreePorts(mappings, 2, 100);
+
+    // postgres default 5434, backend default 8000
+    expect(r1.map((a) => a.port)).toEqual([25534, 28100]);
+    expect(r2.map((a) => a.port)).toEqual([25634, 28200]);
+  });
+});
+
+describe("cross-worktree collision detection", () => {
+  // Clustered defaults: six mock ports (8081-8086) bunched together, plus
+  // spread-out api/web/temporal/mtls. Adjacent worktrees collide at stride 1.
+  const clustered: PortMapping[] = [
+    { serviceName: "api", defaultPort: 3000 },
+    { serviceName: "web", defaultPort: 5173 },
+    { serviceName: "temporal", defaultPort: 8233 },
+    { serviceName: "mtls", defaultPort: 8444 },
+    { serviceName: "mock-api", defaultPort: 8081 },
+    { serviceName: "mock-oauth2-auth", defaultPort: 8082 },
+    { serviceName: "mock-oauth2-res", defaultPort: 8083 },
+    { serviceName: "mock-jwt", defaultPort: 8085 },
+    { serviceName: "mock-sentinel", defaultPort: 8086 },
+  ].map((s) => ({
+    ...s,
+    envVar: s.serviceName.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_PORT",
+    containerPort: s.defaultPort,
+    raw: `\${X:-${s.defaultPort}}:${s.defaultPort}`,
+  }));
+
+  it("finds the three known collisions for indices 1 & 2 at stride 1", () => {
+    const collisions = detectCrossWorktreeCollisions(clustered, 1, 2);
+    const ports = collisions.map((c) => c.port).sort((a, b) => a - b);
+    expect(ports).toEqual([28083, 28084, 28087]);
+  });
+
+  it("is collision-free at stride 100", () => {
+    expect(detectCrossWorktreeCollisions(clustered, 100, 2)).toEqual([]);
+    expect(detectCrossWorktreeCollisions(clustered, 100, 10)).toEqual([]);
+  });
+
+  it("recommends a stride that is collision-free over the horizon", () => {
+    const stride = recommendPortStride(clustered, 2);
+    expect(stride).toBeGreaterThan(1);
+    expect(detectCrossWorktreeCollisions(clustered, stride, 100)).toEqual([]);
   });
 });

@@ -189,7 +189,9 @@ If `wtc` finds hardcoded ports, it warns you and suggests the fix:
 
 ### Port Allocation
 
-Each worktree N gets unique ports: `20000 + default_port + worktree_index`
+Each worktree N gets unique ports: `20000 + default_port + (worktree_index × portStride)`
+
+`portStride` defaults to `1`, so by default the table below holds:
 
 | Service  | Main (default) | Worktree 1 | Worktree 2 | Worktree 3 |
 |----------|---------------|------------|------------|------------|
@@ -199,6 +201,18 @@ Each worktree N gets unique ports: `20000 + default_port + worktree_index`
 | frontend | 5173          | 25174      | 25175      | 25176      |
 
 The table is illustrative — every value follows the formula above. (If an allocation would exceed `65535`, `wtc` falls back to `default_port + 100 × index`.)
+
+#### Clustered default ports and `portStride`
+
+With the default stride of `1`, two worktrees collide on a port whenever a pair of services has default host ports whose difference equals the worktrees' index difference. Projects with **clustered** default ports (e.g. mocks on `8081`–`8086`) therefore collide even between adjacent worktrees, and the second `docker compose up` fails to bind.
+
+When `wtc` detects such a collision across your current worktrees it prints a warning naming the colliding ports and the recommended stride. Set `portStride` in your config (`.wtcrc.json` or `package.json#wtc`) to spread each worktree's ports far enough apart:
+
+```json
+{ "portStride": 100 }
+```
+
+A stride of `100` gives every worktree a 100-port band, which is collision-free unless some pair of default ports differs by an exact multiple of the stride. The recommended value in the warning is the smallest stride that is collision-free over a generous worktree horizon. The canonical `docker compose up` (no `wtc` env) is unaffected — only each worktree's `.env` override block changes.
 
 ### Container Isolation
 
@@ -287,7 +301,8 @@ npx wtc clean
   "sync": [".generated/prisma-client", "local-certs/"],
   "envOverrides": {
     "VITE_API_URL": "http://localhost:${BACKEND_PORT}"
-  }
+  },
+  "portStride": 100
 }
 ```
 
@@ -300,6 +315,10 @@ Extra files/directories to copy from main into each worktree on start. Use for g
 ### `envOverrides`
 
 Additional env vars injected into `.env`. Supports `${VAR}` interpolation with allocated port values. Use when env vars depend on allocated ports (e.g. `VITE_API_URL`).
+
+### `portStride`
+
+Port spacing between consecutive worktree indices (default `1`). Allocated port = `20000 + default_port + worktree_index × portStride`. Raise it (e.g. `100`) when your project exposes clustered default ports that would otherwise collide across worktrees — see [Port Allocation](#port-allocation). `wtc` warns and recommends a value when it detects a collision.
 
 ## MCP Server
 

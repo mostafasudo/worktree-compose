@@ -26,7 +26,11 @@ function startWorktrees(indices: number[]): string {
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
     const project = composeProjectName(ctx.repoName, idx, wt.branch);
-    const allocations = allocateWorktreePorts(ctx.portMappings, idx);
+    const allocations = allocateWorktreePorts(
+      ctx.portMappings,
+      idx,
+      ctx.portStride,
+    );
 
     syncWorktreeFiles(ctx.repoRoot, wt.path, ctx.composeFile, ctx.config.sync);
     copyBaseEnv(ctx.repoRoot, wt.path);
@@ -72,7 +76,11 @@ function listWorktrees(): object {
   return ctx.worktrees.map((wt, i) => {
     const idx = i + 1;
     const project = composeProjectName(ctx.repoName, idx, wt.branch);
-    const allocations = allocateWorktreePorts(ctx.portMappings, idx);
+    const allocations = allocateWorktreePorts(
+      ctx.portMappings,
+      idx,
+      ctx.portStride,
+    );
     const up =
       execSafe(`docker compose -p "${project}" ps --format json`, {
         cwd: wt.path,
