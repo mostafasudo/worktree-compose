@@ -1,0 +1,11 @@
+include:
+  - ./db/compose.yml
+  - path: ./api/compose.yml
+
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    ports:
+      - "${WEB_PORT:-3000}:3000"

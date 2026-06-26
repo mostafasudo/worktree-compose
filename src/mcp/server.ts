@@ -81,10 +81,11 @@ function listWorktrees(): object {
       idx,
       ctx.portStride,
     );
-    const up =
-      execSafe(`docker compose -p "${project}" ps --format json`, {
-        cwd: wt.path,
-      }) !== null;
+    const psOutput = execSafe(
+      `docker compose -p "${project}" ps --format json`,
+      { cwd: wt.path },
+    );
+    const up = psOutput !== null && psOutput.length > 2;
 
     return {
       index: idx,

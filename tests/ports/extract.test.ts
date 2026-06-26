@@ -5,7 +5,7 @@ import {
 import type { ComposeService } from "../../src/compose/types.js";
 
 function svc(name: string, ports: string[]): ComposeService {
-  return { name, ports };
+  return { name, ports, sourcePath: `/repo/${name}/compose.yml` };
 }
 
 describe("extractPortMappings", () => {

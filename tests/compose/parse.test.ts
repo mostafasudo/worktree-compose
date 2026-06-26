@@ -88,4 +88,53 @@ describe("parseComposeFile", () => {
     const api = result.services.find((s) => s.name === "api")!;
     expect(api.build).toEqual({ context: "./api" });
   });
+
+  describe("include:", () => {
+    it("flattens services from nested includes", () => {
+      const result = parseComposeFile(
+        path.join(FIXTURES, "include", "root.yml"),
+      );
+      const names = result.services.map((s) => s.name).sort();
+      expect(names).toEqual(["api", "cache", "postgres", "web"]);
+    });
+
+    it("stamps each service with the file that declared it", () => {
+      const result = parseComposeFile(
+        path.join(FIXTURES, "include", "root.yml"),
+      );
+      const api = result.services.find((s) => s.name === "api")!;
+      expect(api.sourcePath.endsWith("include/api/compose.yml")).toBe(true);
+
+      const cache = result.services.find((s) => s.name === "cache")!;
+      expect(cache.sourcePath.endsWith("include/shared/compose.yml")).toBe(true);
+
+      const web = result.services.find((s) => s.name === "web")!;
+      expect(web.sourcePath.endsWith("include/root.yml")).toBe(true);
+    });
+
+    it("tracks all source files, root first", () => {
+      const result = parseComposeFile(
+        path.join(FIXTURES, "include", "root.yml"),
+      );
+      expect(result.sourceFiles[0].endsWith("include/root.yml")).toBe(true);
+      expect(
+        result.sourceFiles.some((f) => f.endsWith("include/db/compose.yml")),
+      ).toBe(true);
+      expect(
+        result.sourceFiles.some((f) => f.endsWith("include/api/compose.yml")),
+      ).toBe(true);
+      expect(
+        result.sourceFiles.some((f) =>
+          f.endsWith("include/shared/compose.yml"),
+        ),
+      ).toBe(true);
+    });
+
+    it("discovers services in an include-only file (no services key)", () => {
+      const result = parseComposeFile(
+        path.join(FIXTURES, "include", "include-only.yml"),
+      );
+      expect(result.services.map((s) => s.name)).toEqual(["postgres"]);
+    });
+  });
 });
