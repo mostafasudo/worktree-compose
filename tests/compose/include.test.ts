@@ -123,6 +123,71 @@ describe("parseComposeFile with include:", () => {
     expect(result.sourceFiles).toHaveLength(3);
   });
 
+  it("keeps base ports when a local service overrides without repeating them", () => {
+    write(
+      tmpDir,
+      "base.yml",
+      'services:\n  web:\n    ports:\n      - "${WEB_PORT:-8080}:80"\n',
+    );
+    write(
+      tmpDir,
+      "root.yml",
+      "include:\n  - ./base.yml\nservices:\n  web:\n    environment:\n      FOO: bar\n",
+    );
+
+    const result = parseComposeFile(path.join(tmpDir, "root.yml"));
+    const web = result.services.find((s) => s.name === "web")!;
+    // Without deep-merge the override would wipe the port and break isolation.
+    expect(web.ports).toEqual(["${WEB_PORT:-8080}:80"]);
+  });
+
+  it("keeps base ports across a path: list base+overlay", () => {
+    write(
+      tmpDir,
+      "base.yml",
+      'services:\n  web:\n    ports:\n      - "${WEB_PORT:-8080}:80"\n',
+    );
+    write(
+      tmpDir,
+      "overlay.yml",
+      "services:\n  web:\n    environment:\n      FOO: bar\n",
+    );
+    write(
+      tmpDir,
+      "root.yml",
+      "include:\n  - path:\n      - ./base.yml\n      - ./overlay.yml\n",
+    );
+
+    const result = parseComposeFile(path.join(tmpDir, "root.yml"));
+    const web = result.services.find((s) => s.name === "web")!;
+    expect(web.ports).toEqual(["${WEB_PORT:-8080}:80"]);
+  });
+
+  it("unions distinct ports from base and overlay of the same service", () => {
+    write(
+      tmpDir,
+      "base.yml",
+      'services:\n  web:\n    ports:\n      - "${WEB_PORT:-8080}:80"\n',
+    );
+    write(
+      tmpDir,
+      "overlay.yml",
+      'services:\n  web:\n    ports:\n      - "${ADMIN_PORT:-9090}:9090"\n',
+    );
+    write(
+      tmpDir,
+      "root.yml",
+      "include:\n  - path:\n      - ./base.yml\n      - ./overlay.yml\n",
+    );
+
+    const result = parseComposeFile(path.join(tmpDir, "root.yml"));
+    const web = result.services.find((s) => s.name === "web")!;
+    expect(web.ports).toEqual([
+      "${WEB_PORT:-8080}:80",
+      "${ADMIN_PORT:-9090}:9090",
+    ]);
+  });
+
   it("tolerates empty (null) service definitions", () => {
     write(
       tmpDir,

@@ -97,14 +97,53 @@ function normalizeIncludes(include: unknown, parentPath: string): string[] {
   return out;
 }
 
-/** Merge included and local services by name; local services win. */
-function mergeServices(
-  included: ComposeService[],
-  local: ComposeService[],
-): ComposeService[] {
+/**
+ * Combine two definitions of the same service. Docker Compose deep-merges
+ * same-named services across included/overriding files rather than replacing
+ * them wholesale, so a later definition that omits `ports` must NOT discard the
+ * earlier one's ports — otherwise that service silently loses its per-worktree
+ * port isolation. We merge the fields wtc relies on: ports are unioned (deduped
+ * by raw mapping so the allocator never sees a duplicate), while build/envFile
+ * fall back to the base when the override doesn't set them. sourcePath stays
+ * aligned with whichever file actually declared `build`, so getDockerfiles
+ * resolves the context relative to the right directory.
+ */
+function mergeService(
+  base: ComposeService,
+  override: ComposeService,
+): ComposeService {
+  const ports = [...base.ports];
+  for (const p of override.ports) {
+    if (!ports.includes(p)) ports.push(p);
+  }
+  const sourcePath =
+    override.build !== undefined
+      ? override.sourcePath
+      : base.build !== undefined
+        ? base.sourcePath
+        : override.sourcePath;
+  return {
+    name: override.name,
+    ports,
+    build: override.build ?? base.build,
+    envFile: override.envFile ?? base.envFile,
+    sourcePath,
+  };
+}
+
+/**
+ * Fold services in declaration order (included first, in include order, then
+ * local), deep-merging any later definition of an already-seen service name
+ * onto the earlier one. Replaces a previous wholesale last-writer-wins merge,
+ * which silently dropped the base's ports when an override redefined a service
+ * without repeating them.
+ */
+function foldServices(services: ComposeService[]): ComposeService[] {
   const byName = new Map<string, ComposeService>();
-  for (const svc of included) byName.set(svc.name, svc);
-  for (const svc of local) byName.set(svc.name, svc);
+  for (const svc of services) {
+    const existing = byName.get(svc.name);
+    byName.set(svc.name, existing ? mergeService(existing, svc) : svc);
+  }
   return [...byName.values()];
 }
 
@@ -141,7 +180,7 @@ function parseRecursive(
   }
 
   const local = parseServicesObject(doc as Record<string, unknown>, key);
-  return mergeServices(included, local);
+  return foldServices([...included, ...local]);
 }
 
 export function parseComposeFile(composePath: string): ComposeFile {
