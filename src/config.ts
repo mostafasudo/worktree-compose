@@ -4,6 +4,13 @@ import path from "node:path";
 export interface WtcConfig {
   sync?: string[];
   envOverrides?: Record<string, string>;
+  /**
+   * Per-worktree-index port stride. Allocated port =
+   * 20000 + defaultPort + worktreeIndex * portStride. Defaults to 1.
+   * Raise it (e.g. 100) when a project exposes clustered default host
+   * ports so that adjacent worktrees do not collide across services.
+   */
+  portStride?: number;
 }
 
 export function loadConfig(repoRoot: string): WtcConfig {

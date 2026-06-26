@@ -60,7 +60,11 @@ export function listCommand(): void {
     const wt = ctx.worktrees[i];
     const idx = i + 1;
     const project = composeProjectName(ctx.repoName, idx, wt.branch);
-    const allocations = allocateWorktreePorts(ctx.portMappings, idx);
+    const allocations = allocateWorktreePorts(
+      ctx.portMappings,
+      idx,
+      ctx.portStride,
+    );
     const up = isWorktreeUp(project, wt.path);
 
     const ports = allocations
