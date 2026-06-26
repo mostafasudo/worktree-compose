@@ -2,3 +2,7 @@ node_modules
 dist
 coverage
 *.tsbuildinfo
+
+# Secrets — never commit. .env holds NPM_TOKEN; .npmrc references it for publish.
+.env
+.npmrc

@@ -17,6 +17,7 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage",
+    "release": "set -a && . ./.env && set +a && pnpm publish --no-git-checks",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
