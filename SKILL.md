@@ -7,7 +7,7 @@ description: How to run multiple git worktrees in parallel, each with isolated D
 
 Run multiple git worktrees in parallel, each with isolated Docker containers and ports.
 
-Powered by [`worktree-compose`](https://github.com/mostafasudo/worktree-compose#readme) (`wtc`). Install with `npm install -D worktree-compose`, then drive it with `npx wtc <command>`.
+Powered by [`worktree-compose`](https://github.com/mostafasudo/worktree-compose#readme) (`wtc`). Install once, globally, with `npm install -g worktree-compose` (it's a cross-project devtool), then drive it with `npx wtc <command>`.
 
 | Command | What it does |
 |---------|-------------|

@@ -21,7 +21,7 @@ Every worktree gets its own ports, database, cache, and containers — **automat
 </div>
 
 ```bash
-npm install -D worktree-compose
+npm install -g worktree-compose
 ```
 
 ```
@@ -103,7 +103,7 @@ wtc clean
 
 ```bash
 # 1. Install
-npm install -D worktree-compose
+npm install -g worktree-compose
 
 # 2. Create a worktree for some parallel work
 git worktree add ../myapp-feature feature-branch
@@ -391,7 +391,7 @@ ln -s "$(pwd)/SKILL.md" ~/.claude/skills/worktree-compose/SKILL.md
 
 ```bash
 cd myapp
-pnpm add -D worktree-compose
+pnpm add -g worktree-compose
 
 git branch agent-1-auth
 git branch agent-2-auth
