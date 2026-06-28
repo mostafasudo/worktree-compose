@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="https://raw.githubusercontent.com/mostafasudo/worktree-compose/main/worktree-compose.jpg" alt="worktree-compose logo" width="140" />
+
 # worktree-compose · `wtc`
 
 ### Zero-config Docker Compose isolation for git worktrees
@@ -47,6 +49,7 @@ npx wtc list
 - [Commands](#commands)
 - [Configuration (Optional)](#configuration-optional)
 - [MCP Server](#mcp-server)
+- [Agent Skill](#agent-skill)
 - [Full Example](#full-example)
 - [Requirements](#requirements)
 - [Troubleshooting](#troubleshooting)
@@ -374,6 +377,15 @@ Built-in [MCP](https://modelcontextprotocol.io/) server so AI agents can manage 
 | `wtc_list` | none | List worktrees (returns JSON) |
 | `wtc_promote` | `index: number` | Pull worktree changes into current branch |
 | `wtc_clean` | none | Tear down everything |
+
+## Agent Skill
+
+This repo ships a [`SKILL.md`](./SKILL.md) — an [agent skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches AI coding agents the `wtc` worktree workflow (commands, port allocation, config, and the MCP server above). Symlink it into your agent's skills directory so it loads in any project:
+
+```bash
+mkdir -p ~/.claude/skills/worktree-compose
+ln -s "$(pwd)/SKILL.md" ~/.claude/skills/worktree-compose/SKILL.md
+```
 
 ## Full Example
 
