@@ -17,12 +17,40 @@ program
   .description("Zero-config Docker Compose isolation for git worktrees")
   .version(VERSION);
 
+function collectWorkspace(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+interface EnvCommandOptions {
+  env?: string;
+  workspace?: string[];
+}
+
+function envCliOptions(options: EnvCommandOptions) {
+  return {
+    envFile: options.env,
+    workspaces: options.workspace,
+  };
+}
+
 program
   .command("start")
   .description("Start Docker Compose stacks for worktrees")
   .argument("[indices...]", "Worktree indices to start (omit for all)")
-  .action((indices: string[]) => {
-    wrap(() => startCommand(indices.map(Number)));
+  .option(
+    "--env <name>",
+    'Env filename to copy and inject (default: ".env")',
+  )
+  .option(
+    "--workspace <name>",
+    "Workspace to also inject env into (repeatable)",
+    collectWorkspace,
+    [] as string[],
+  )
+  .action((indices: string[], options: EnvCommandOptions) => {
+    wrap(() =>
+      startCommand(indices.map(Number), envCliOptions(options)),
+    );
   });
 
 program
@@ -37,8 +65,20 @@ program
   .command("restart")
   .description("Restart Docker Compose stacks for worktrees")
   .argument("[indices...]", "Worktree indices to restart (omit for all)")
-  .action((indices: string[]) => {
-    wrap(() => restartCommand(indices.map(Number)));
+  .option(
+    "--env <name>",
+    'Env filename to copy and inject (default: ".env")',
+  )
+  .option(
+    "--workspace <name>",
+    "Workspace to also inject env into (repeatable)",
+    collectWorkspace,
+    [] as string[],
+  )
+  .action((indices: string[], options: EnvCommandOptions) => {
+    wrap(() =>
+      restartCommand(indices.map(Number), envCliOptions(options)),
+    );
   });
 
 program

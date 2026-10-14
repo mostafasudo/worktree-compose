@@ -20,6 +20,8 @@ Powered by [`worktree-compose`](https://github.com/mostafasudo/worktree-compose#
 
 All commands except `promote`/`clean` accept optional indices: `npx wtc start 1`, `npx wtc start 1 2 3`.
 
+`start` and `restart` also accept `--env <name>` (default `.env`) and repeatable `--workspace <name>` for monorepos — e.g. `npx wtc start --env .env.development --workspace server`.
+
 Worktrees come first — create one before starting a stack:
 
 ```bash
@@ -51,15 +53,25 @@ The table is illustrative — every value follows the formula. If your project e
 ```json
 {
   "sync": [".generated/prisma-client", "local-certs/"],
+  "envFile": ".env.development",
+  "workspaces": ["server", "homepage"],
   "envOverrides": {
     "VITE_API_URL": "http://localhost:${BACKEND_PORT}"
+  },
+  "workspaceEnvOverrides": {
+    "server": {
+      "DATABASE_URL": "postgresql://postgres:postgres@localhost:${POSTGRES_PORT}/postgres"
+    }
   },
   "portStride": 100
 }
 ```
 
 - **sync**: Extra files/dirs copied from main into each worktree on start. Use for gitignored or generated files Docker needs but that aren't committed (generated clients, local certs, build artifacts).
-- **envOverrides**: Additional env vars injected into `.env`, with `${VAR}` interpolation against allocated port values. Use when a var depends on an allocated port (e.g. `VITE_API_URL`).
+- **envFile**: Env filename to copy and inject (default `.env`), for the root and every selected workspace. The CLI flag is `--env` (Node intercepts `--env-file` itself).
+- **workspaces**: Monorepo workspaces (package name, directory name, or path) that also get their env file copied + injected, in addition to the root. Workspaces are discovered from `package.json#workspaces` / `pnpm-workspace.yaml` — only directories with a `package.json` count.
+- **envOverrides**: Additional env vars injected into the root env file, with `${VAR}` interpolation against allocated port values. Existing keys are rewritten in place.
+- **workspaceEnvOverrides**: Per-workspace overrides (keyed by workspace name/dir), applied only to that workspace's env file.
 - **portStride**: Port spacing between consecutive worktree indices (default `1`). Raise it when clustered default ports would otherwise collide across worktrees.
 
 ## MCP server
@@ -74,4 +86,4 @@ See the [wtc README](https://github.com/mostafasudo/worktree-compose#mcp-server)
 
 ## How it works
 
-`docker-compose.yml` uses `${VAR:-default}` syntax for all host ports. On `start`, `wtc` syncs infrastructure files from main (compose file plus any `include:`d files, referenced Dockerfiles, and base `.env`), copies a fresh `.env`, appends allocated port overrides in an idempotent delimited block, and runs `docker compose up -d --build` with an isolated `COMPOSE_PROJECT_NAME`. Re-running `start` strips and rewrites the block, so it never accumulates.
+`docker-compose.yml` uses `${VAR:-default}` syntax for all host ports. On `start`, `wtc` syncs infrastructure files from main (compose file plus any `include:`d files and referenced Dockerfiles), copies env files from the main checkout (root `.env`, or the configured `envFile`; plus every selected workspace's env file), injects allocated port overrides (rewriting existing keys in place, appending the rest in an idempotent delimited block), and runs `docker compose up -d --build` with an isolated `COMPOSE_PROJECT_NAME`. Re-running `start` strips and rewrites the block, so it never accumulates.

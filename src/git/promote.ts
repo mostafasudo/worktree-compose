@@ -3,12 +3,21 @@ import path from "node:path";
 import { exec, execSafe } from "../utils/exec.js";
 
 const PROMOTE_EXCLUDES = new Set([
-  ".env",
   "docker-compose.yml",
   "docker-compose.yaml",
   "compose.yml",
   "compose.yaml",
 ]);
+
+/**
+ * Local env files are excluded from promote (`.env.example` is committed and
+ * therefore promotable): `.env`, `.env.development`, `.env.local`, …
+ */
+function isEnvFile(file: string): boolean {
+  const base = path.posix.basename(file);
+  if (base === ".env.example") return false;
+  return base === ".env" || base.startsWith(".env.");
+}
 
 function resolveRef(repoRoot: string, ref: string): string {
   return exec(`git -C "${repoRoot}" rev-parse "${ref}"`);
@@ -49,7 +58,9 @@ export function getChangedFiles(
     .filter(Boolean);
 
   const unique = [...new Set(allFiles)];
-  return unique.filter((f) => !PROMOTE_EXCLUDES.has(f));
+  return unique.filter(
+    (f) => !PROMOTE_EXCLUDES.has(f) && !isEnvFile(f),
+  );
 }
 
 export function getLocalDirtyFiles(repoRoot: string): string[] {

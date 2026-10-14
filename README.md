@@ -45,6 +45,7 @@ npx wtc list
 - [Quick Start](#quick-start)
 - [Usage](#usage)
 - [Preparing your docker-compose.yml](#preparing-your-docker-composeyml)
+- [Monorepos & custom env files](#monorepos--custom-env-files)
 - [How It Works](#how-it-works)
 - [Commands](#commands)
 - [Configuration (Optional)](#configuration-optional)
@@ -125,6 +126,9 @@ npx wtc start
 npx wtc start 1
 npx wtc start 1 2 3
 
+# Monorepo: inject into named workspaces with a custom env filename
+npx wtc start --env .env.development --workspace server --workspace homepage
+
 # See what's running
 npx wtc list
 
@@ -200,6 +204,39 @@ include:
 
 Build contexts in an included file resolve relative to that file's own directory, just as Docker Compose does. (Included files that live outside the repo still have their ports isolated, but aren't copied into the worktree.)
 
+## Monorepos & custom env files
+
+In a monorepo, local env files usually live next to each app (`apps/server/.env.development`) instead of at the repo root, and the filename isn't always `.env`. Use `envFile` plus workspace selectors to keep every worktree's env files consistent:
+
+```bash
+# Copy + inject apps/server/.env.development and apps/homepage/.env.development
+# into the worktree, in addition to the root env file
+npx wtc start --env .env.development --workspace server --workspace homepage
+```
+
+Or make it the project default in `.wtcrc.json`: 
+
+```json
+{
+  "envFile": ".env.development",
+  "workspaces": ["server", "homepage"],
+  "workspaceEnvOverrides": {
+    "server": {
+      "DATABASE_URL": "postgresql://postgres:postgres@localhost:${POSTGRES_PORT}/postgres"
+    }
+  }
+}
+```
+
+How workspace selection works:
+
+- Workspaces come from `package.json#workspaces` (npm/bun/yarn) or `pnpm-workspace.yaml#packages`. Only directories with a `package.json` count.
+- `--workspace` matches by package **name**, directory name, or repo-relative path, and may be repeated.
+- The **repo root is always processed** — docker compose interpolates `${POSTGRES_PORT:-5433}` from the root env file, so skipping it would break port isolation.
+- A selected workspace with no env file (and no `.env.example`) is skipped with a warning.
+
+> **Why `--env`, not `--env-file`?** Node.js intercepts `--env-file` in its own argv parsing — even after the script path — so the flag never reaches `wtc`. `--env` is the safe spelling; the config key stays `envFile`.
+
 ## How It Works
 
 ### Port Allocation
@@ -235,14 +272,22 @@ Each worktree gets its own `COMPOSE_PROJECT_NAME` — `{repo}-wt-{index}-{branch
 
 ### File Sync
 
-Before starting, `wtc` copies infrastructure files from main into each worktree: the compose file (plus any files it pulls in via `include:`), every Dockerfile referenced by a service's `build`, and your base `.env` (falling back to `.env.example`, or an empty file if neither exists). This keeps every worktree on the latest Docker setup.
+Before starting, `wtc` copies infrastructure files from main into each worktree: the compose file (plus any files it pulls in via `include:`) and every Dockerfile referenced by a service's `build`. This keeps every worktree on the latest Docker setup.
+
+### Env Files
+
+`wtc` copies the env file from the main checkout into each worktree — `.env` by default, or a custom name via `envFile` / `--env` (falling back to `.env.example`). In monorepos, selected workspaces get their env files copied to the same relative path too (e.g. `apps/server/.env.development`). Because these files are usually gitignored, worktrees start from the pristine main-checkout copy on every `start`/`restart`.
 
 ### Env Injection
 
-After copying `.env`, `wtc` appends an idempotent block with allocated port overrides:
+Port overrides are injected into every target env file:
+
+- **A key that already exists is rewritten in place** — comments, ordering, and all other lines are preserved. So `DATABASE_URL=postgresql://…:5433/postgres` becomes `…:25435/postgres` in worktree 1 without restructuring your env files.
+- **Keys that don't exist are appended** in an idempotent block.
 
 ```bash
 # existing .env content stays untouched...
+DATABASE_URL=postgresql://postgres:postgres@localhost:25435/postgres  # rewritten in place
 
 # --- wtc port overrides ---
 POSTGRES_PORT=25435
@@ -252,7 +297,7 @@ FRONTEND_PORT=25174
 # --- end wtc ---
 ```
 
-Re-running `wtc start` strips and rewrites this block, so it never accumulates.
+Re-running `wtc start` strips and rewrites the block, so it never accumulates.
 
 ## Commands
 
@@ -264,6 +309,9 @@ Start Docker Compose stacks. Syncs files, injects ports, runs `docker compose up
 npx wtc start         # all worktrees
 npx wtc start 1       # worktree 1 only
 npx wtc start 1 2 3   # worktrees 1, 2, and 3
+
+# Override the env filename and add workspace targets (see Monorepos below)
+npx wtc start --env .env.development --workspace server 1
 ```
 
 ### `wtc stop [indices...]`
@@ -277,7 +325,7 @@ npx wtc stop 1        # worktree 1 only
 
 ### `wtc restart [indices...]`
 
-Full restart: stop, re-sync files, re-inject env, rebuild, start. Use after migrations, Dockerfile changes, or config updates.
+Full restart: stop, re-sync files, re-inject env, rebuild, start. Use after migrations, Dockerfile changes, or config updates. Accepts the same `--env` and `--workspace` flags as `start`.
 
 ```bash
 npx wtc restart 1
@@ -293,7 +341,7 @@ npx wtc list
 
 ### `wtc promote <index>`
 
-Copy a worktree's changed files — added, modified, and deleted — into your current branch as uncommitted changes. Skips `.env` and compose files, and aborts if any file it would touch has uncommitted local changes.
+Copy a worktree's changed files — added, modified, and deleted — into your current branch as uncommitted changes. Skips local env files (`.env`, `.env.development`, …) and compose files, and aborts if any file it would touch has uncommitted local changes.
 
 ```bash
 npx wtc promote 1
@@ -314,8 +362,15 @@ npx wtc clean
 ```json
 {
   "sync": [".generated/prisma-client", "local-certs/"],
+  "envFile": ".env.development",
+  "workspaces": ["server", "homepage"],
   "envOverrides": {
     "VITE_API_URL": "http://localhost:${BACKEND_PORT}"
+  },
+  "workspaceEnvOverrides": {
+    "server": {
+      "DATABASE_URL": "postgresql://postgres:postgres@localhost:${POSTGRES_PORT}/postgres"
+    }
   },
   "portStride": 100
 }
@@ -327,9 +382,21 @@ Or use a `"wtc"` key in `package.json`. (`.wtcrc.json` takes precedence.)
 
 Extra files/directories to copy from main into each worktree on start. Use for gitignored or generated files that Docker needs but aren't committed — like generated clients, local certificates, or build artifacts.
 
+### `envFile`
+
+Env filename to copy from main and inject overrides into, for the root and every selected workspace. Defaults to `.env`. Per-run override: `--env`.
+
+### `workspaces`
+
+Monorepo workspaces that also get their env file copied and injected, in addition to the root. Accepts package names, directory names, or repo-relative paths. Omitted → root only. Per-run override: `--workspace`. See [Monorepos & custom env files](#monorepos--custom-env-files).
+
 ### `envOverrides`
 
-Additional env vars injected into `.env`. Supports `${VAR}` interpolation with allocated port values. Use when env vars depend on allocated ports (e.g. `VITE_API_URL`).
+Additional env vars injected into the **root** env file. Supports `${VAR}` interpolation with allocated port values. Existing keys are rewritten in place; new keys are appended in the override block.
+
+### `workspaceEnvOverrides`
+
+Per-workspace overrides, keyed by workspace name (directory name/path also work). Applied only to that workspace's env file, with the same `${VAR}` interpolation and in-place rewrite behavior as `envOverrides`.
 
 ### `portStride`
 
@@ -371,9 +438,9 @@ Built-in [MCP](https://modelcontextprotocol.io/) server so AI agents can manage 
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `wtc_start` | `indices?: number[]` | Start worktree stacks |
+| `wtc_start` | `indices?: number[]`, `envFile?: string`, `workspaces?: string[]` | Start worktree stacks |
 | `wtc_stop` | `indices?: number[]` | Stop worktree stacks |
-| `wtc_restart` | `indices?: number[]` | Restart after migrations/config changes |
+| `wtc_restart` | `indices?: number[]`, `envFile?: string`, `workspaces?: string[]` | Restart after migrations/config changes |
 | `wtc_list` | none | List worktrees (returns JSON) |
 | `wtc_promote` | `index: number` | Pull worktree changes into current branch |
 | `wtc_clean` | none | Tear down everything |

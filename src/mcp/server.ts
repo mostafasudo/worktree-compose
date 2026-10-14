@@ -1,12 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { buildContext, filterWorktrees } from "../context.js";
+import { buildContext, filterWorktrees, getEnvTargets } from "../context.js";
+import type { EnvCliOptions } from "../context.js";
 import { allocateWorktreePorts } from "../ports/allocate.js";
 import { composeProjectName } from "../utils/sanitize.js";
 import { exec, execSafe } from "../utils/exec.js";
 import { syncWorktreeFiles } from "../sync/files.js";
-import { copyBaseEnv, injectPortOverrides } from "../sync/env.js";
+import { injectPortOverrides, prepareEnvFile } from "../sync/env.js";
 import { getRepoRoot } from "../compose/detect.js";
 import { getWorktreeByIndex, getWorktreeBranch } from "../git/worktree.js";
 import {
@@ -17,11 +18,12 @@ import {
 } from "../git/promote.js";
 import { VERSION } from "../version.js";
 
-function startWorktrees(indices: number[]): string {
-  const ctx = buildContext();
+function startWorktrees(indices: number[], cli: EnvCliOptions = {}): string {
+  const ctx = buildContext(cli);
   if (ctx.worktrees.length === 0) return "No worktrees found.";
 
   const targets = filterWorktrees(ctx.worktrees, indices);
+  const envTargets = getEnvTargets(ctx);
   const results: string[] = [];
 
   for (const wt of targets) {
@@ -34,12 +36,12 @@ function startWorktrees(indices: number[]): string {
     );
 
     syncWorktreeFiles(ctx.repoRoot, wt.path, ctx.composeFile, ctx.config.sync);
-    copyBaseEnv(ctx.repoRoot, wt.path);
-    injectPortOverrides(
-      `${wt.path}/.env`,
-      allocations,
-      ctx.config.envOverrides,
-    );
+
+    for (const target of envTargets) {
+      const envPath = prepareEnvFile(ctx.repoRoot, wt.path, target);
+      if (!envPath) continue;
+      injectPortOverrides(envPath, allocations, target.overrides);
+    }
 
     exec(`docker compose -p "${project}" up -d --build`, { cwd: wt.path });
 
@@ -129,9 +131,18 @@ export async function startMcpServer(): Promise<void> {
   server.tool(
     "wtc_start",
     "Start Docker Compose stacks for worktrees. Syncs files, injects isolated ports, runs docker compose up.",
-    { indices: z.array(z.number()).optional().describe("Worktree indices to start. Omit for all.") },
-    async ({ indices }) => ({
-      content: [{ type: "text", text: startWorktrees(indices ?? []) }],
+    {
+      indices: z.array(z.number()).optional().describe("Worktree indices to start. Omit for all."),
+      envFile: z.string().optional().describe('Env filename to copy and inject, e.g. ".env.development". Default: ".env".'),
+      workspaces: z.array(z.string()).optional().describe("Monorepo workspaces (by package name, directory, or path) that also get env injected."),
+    },
+    async ({ indices, envFile, workspaces }) => ({
+      content: [
+        {
+          type: "text",
+          text: startWorktrees(indices ?? [], { envFile, workspaces }),
+        },
+      ],
     }),
   );
 
@@ -147,10 +158,14 @@ export async function startMcpServer(): Promise<void> {
   server.tool(
     "wtc_restart",
     "Restart Docker Compose stacks for worktrees. Use after DB migrations, Dockerfile changes, or config updates.",
-    { indices: z.array(z.number()).optional().describe("Worktree indices to restart. Omit for all.") },
-    async ({ indices }) => {
+    {
+      indices: z.array(z.number()).optional().describe("Worktree indices to restart. Omit for all."),
+      envFile: z.string().optional().describe('Env filename to copy and inject, e.g. ".env.development". Default: ".env".'),
+      workspaces: z.array(z.string()).optional().describe("Monorepo workspaces (by package name, directory, or path) that also get env injected."),
+    },
+    async ({ indices, envFile, workspaces }) => {
       stopWorktrees(indices ?? []);
-      const result = startWorktrees(indices ?? []);
+      const result = startWorktrees(indices ?? [], { envFile, workspaces });
       return { content: [{ type: "text", text: result }] };
     },
   );

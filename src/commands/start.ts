@@ -1,14 +1,19 @@
-import { buildContext, filterWorktrees } from "../context.js";
+import path from "node:path";
+import { buildContext, filterWorktrees, getEnvTargets } from "../context.js";
+import type { EnvCliOptions } from "../context.js";
 import { allocateWorktreePorts } from "../ports/allocate.js";
 import { composeProjectName } from "../utils/sanitize.js";
 import { execLive } from "../utils/exec.js";
 import { syncWorktreeFiles } from "../sync/files.js";
-import { copyBaseEnv, injectPortOverrides } from "../sync/env.js";
+import { injectPortOverrides, prepareEnvFile } from "../sync/env.js";
 import * as log from "../utils/log.js";
 import { listCommand } from "./list.js";
 
-export function startCommand(indices: number[]): void {
-  const ctx = buildContext();
+export function startCommand(
+  indices: number[],
+  cli: EnvCliOptions = {},
+): void {
+  const ctx = buildContext(cli);
 
   if (ctx.worktrees.length === 0) {
     log.warn(
@@ -18,6 +23,7 @@ export function startCommand(indices: number[]): void {
   }
 
   const targets = filterWorktrees(ctx.worktrees, indices);
+  const envTargets = getEnvTargets(ctx);
 
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
@@ -43,13 +49,21 @@ export function startCommand(indices: number[]): void {
     );
     log.success("Synced infrastructure files");
 
-    copyBaseEnv(ctx.repoRoot, wt.path);
-    injectPortOverrides(
-      `${wt.path}/.env`,
-      allocations,
-      ctx.config.envOverrides,
-    );
-    log.success("Injected port overrides into .env");
+    const injected: string[] = [];
+    for (const target of envTargets) {
+      const envPath = prepareEnvFile(ctx.repoRoot, wt.path, target);
+      if (!envPath) {
+        log.warn(
+          `No ${target.envFileName} (or .env.example) found for ${target.label}; skipped`,
+        );
+        continue;
+      }
+      injectPortOverrides(envPath, allocations, target.overrides);
+      injected.push(path.relative(wt.path, envPath));
+    }
+    if (injected.length > 0) {
+      log.success(`Injected port overrides into ${injected.join(", ")}`);
+    }
 
     execLive(`docker compose -p "${project}" up -d --build`, {
       cwd: wt.path,
