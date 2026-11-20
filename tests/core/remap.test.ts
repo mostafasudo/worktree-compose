@@ -39,7 +39,11 @@ module.exports = (args) => {
     return;
   }
   fs.appendFileSync(${JSON.stringify(path.join(base, "calls.log"))},
-    JSON.stringify({ args: args.join(" "), composeFile: process.env.COMPOSE_FILE || null }) + "\\n");
+    JSON.stringify({
+      args: args.join(" "),
+      composeFile: process.env.COMPOSE_FILE || null,
+      separator: process.env.COMPOSE_PATH_SEPARATOR || null,
+    }) + "\\n");
 };
 `;
 }
@@ -73,7 +77,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     fs.rmSync(base, { recursive: true, force: true });
   });
 
-  function calls(): { args: string; composeFile: string | null }[] {
+  function calls(): { args: string; composeFile: string | null; separator: string | null }[] {
     const file = path.join(base, "calls.log");
     if (!fs.existsSync(file)) return [];
     return fs.readFileSync(file, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
@@ -91,7 +95,8 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     expect(result.started[0].ports).toEqual({ "web:8080": 28081, API_PORT: 23001 });
     expect(engine.composeLog()).toEqual([`-p ${project} up -d`]);
     const composeFile = files(path.join(wt, "compose.yaml"), override());
-    expect(calls()).toEqual([{ args: `-p ${project} up -d`, composeFile }]);
+    // The separator goes with the list: it beats one a .env might set.
+    expect(calls()).toEqual([{ args: `-p ${project} up -d`, composeFile, separator: path.delimiter }]);
 
     const yaml = fs.readFileSync(override(), "utf-8");
     expect(yaml).toContain("ports: !override");
@@ -127,6 +132,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     expect(calls()[1]).toEqual({
       args: `-p ${project} stop`,
       composeFile: files(path.join(wt, "compose.yaml"), override()),
+      separator: path.delimiter,
     });
 
     git(root, "worktree", "remove", "--force", wt);
@@ -136,6 +142,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     expect(calls()[2]).toEqual({
       args: `-p ${project} down -v --remove-orphans`,
       composeFile: files(path.join(root, "compose.yaml"), override()),
+      separator: path.delimiter,
     });
     expect(fs.existsSync(override())).toBe(false);
   });
@@ -237,7 +244,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
 
     await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: wt });
 
-    expect(calls()[1]).toEqual({ args: `-p ${project} up -d`, composeFile: null });
+    expect(calls()[1]).toEqual({ args: `-p ${project} up -d`, composeFile: null, separator: null });
   });
 
   it("leaves a stack alone whose worktree .env sets its own COMPOSE_FILE (custom envFile)", async () => {
@@ -277,6 +284,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     expect(calls()[1]).toEqual({
       args: `-p ${project} down -v --remove-orphans`,
       composeFile: files(path.join(wt, "compose.yaml"), override()),
+      separator: path.delimiter,
     });
     expect(fs.existsSync(override())).toBe(true);
     expect(fs.readFileSync(path.join(wt, ".env"), "utf-8")).toContain(`COMPOSE_FILE='${files(path.join(wt, "compose.yaml"), override())}'`);
@@ -365,14 +373,18 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     ]);
   });
 
-  it("stop leaves wtc's list out when the worktree's .env now splits it differently", async () => {
+  it("stop passes the list it started with, and its separator, whatever the worktree's .env now says", async () => {
     engine.setComposeHook(remapHook(base));
     await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: root });
     fs.appendFileSync(path.join(wt, ".env"), "COMPOSE_PATH_SEPARATOR=|\n");
 
     await stopWorktrees({ worktrees: ["feat"] }, silentReporter, { live: false, cwd: root });
 
-    expect(calls()[1]).toEqual({ args: `-p ${project} stop`, composeFile: null });
+    expect(calls()[1]).toEqual({
+      args: `-p ${project} stop`,
+      composeFile: files(path.join(wt, "compose.yaml"), override()),
+      separator: path.delimiter,
+    });
   });
 
   it("start keeps an override the shell's COMPOSE_FILE still lists, even when it no longer remaps", async () => {
@@ -387,5 +399,23 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
 
     expect(reporter.lines.join("\n")).toMatch(/COMPOSE_FILE is set in the environment/);
     expect(fs.existsSync(override())).toBe(true);
+  });
+
+  it("leaves a hardcoded port alone when its port is a variable's that the stack already publishes", async () => {
+    engine.setComposeHook(remapHook(base));
+    write(
+      root,
+      "compose.yaml",
+      'services:\n  x:\n    image: x\n    ports:\n      - "${PORT:-8080}:80/tcp"\n      - "8080:80/udp"\n      - "28081-28082:81-82/udp"\n',
+    );
+    const reporter = new CollectingReporter();
+
+    const result = await startWorktrees({ worktrees: ["feat"], build: false }, reporter, { live: false, cwd: root });
+
+    expect(result.started[0].ports).toEqual({ PORT: 28081 });
+    expect(fs.existsSync(override())).toBe(false);
+    expect(reporter.lines).toContain(
+      '⚠ Service "x": hardcoded host port 8080 would move to 28081, which this stack already publishes, so it stays 8080.',
+    );
   });
 });

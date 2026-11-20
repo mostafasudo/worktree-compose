@@ -284,12 +284,12 @@ export function overridePath(commonDir: string, project: string): string {
 
 /**
  * True when a `COMPOSE_FILE` value is exactly a list wtc writes — the
- * compose file, the directory's own compose override if any, then one of
- * wtc's overrides: the line wtc wrote into a worktree's env file, exported
- * into the shell by a tool that loads `.env` (direnv's `dotenv`, mise,
- * autoenv). That is not a file list of the user's, so it must not switch
- * remapping off. A list with anything else in it (the user appended a
- * file) is the user's.
+ * compose file, then the compose override compose itself would pick in
+ * that directory if there is one, then one of wtc's overrides: the line
+ * wtc wrote into a worktree's env file, exported into the shell by a tool
+ * that loads `.env` (direnv's `dotenv`, mise, autoenv). That is not a file
+ * list of the user's, so it must not switch remapping off. Any other list
+ * (a file added, another override picked) is the user's.
  */
 export function isWtcComposeFile(value: string, commonDir: string): boolean {
   const dir = path.dirname(overridePath(commonDir, "_"));
@@ -297,12 +297,10 @@ export function isWtcComposeFile(value: string, commonDir: string): boolean {
   if (files.length < 2 || files.length > 3) return false;
   if (path.dirname(path.resolve(files[files.length - 1])) !== dir) return false;
   if (!COMPOSE_FILENAMES.includes(path.basename(files[0]))) return false;
-  if (files.length === 2) return true;
-  // The compose override wtc lists is the one next to the compose file.
-  return (
-    USER_OVERRIDE_FILENAMES.includes(path.basename(files[1])) &&
-    path.dirname(path.resolve(files[1])) === path.dirname(path.resolve(files[0]))
-  );
+  const userOverride = findUserOverride(path.dirname(path.resolve(files[0])));
+  return files.length === 2
+    ? userOverride === null
+    : userOverride !== null && path.resolve(files[1]) === userOverride;
 }
 
 /**

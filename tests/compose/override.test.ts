@@ -23,6 +23,7 @@ import { extractPortMappings } from "../../src/ports/extract.js";
 import { allocateWorktreePorts } from "../../src/ports/allocate.js";
 import { runSafe } from "../../src/utils/exec.js";
 import { literalEnvValue } from "../../src/sync/env.js";
+import { composeEnv } from "../../src/core/compose.js";
 import type { ComposeEngine } from "../../src/compose/engine.js";
 import type { RemapInputs } from "../../src/compose/override.js";
 
@@ -439,9 +440,13 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
       const commonDir = path.join(tmp, ".git");
       const wtcFile = overridePath(commonDir, "app-wt-1-feat");
       expect(isWtcComposeFile(process.env.COMPOSE_FILE, commonDir)).toBe(true);
-      expect(
-        isWtcComposeFile(composeFileValue([path.join(tmp, "wt", "compose.yaml"), path.join(tmp, "wt", "compose.override.yaml"), wtcFile])!, commonDir),
-      ).toBe(true);
+      // With the compose override compose itself would pick there, and only that one.
+      const yml = write(tmp, "wt2/compose.override.yml", "services: {}\n");
+      const yaml = write(tmp, "wt2/compose.override.yaml", "services: {}\n");
+      const base2 = path.join(tmp, "wt2", "compose.yaml");
+      expect(isWtcComposeFile(composeFileValue([base2, yml, wtcFile])!, commonDir)).toBe(true);
+      expect(isWtcComposeFile(composeFileValue([base2, yaml, wtcFile])!, commonDir)).toBe(false);
+      expect(isWtcComposeFile(composeFileValue([base2, wtcFile])!, commonDir)).toBe(false);
       // Anything else in the list makes it the user's.
       expect(isWtcComposeFile(`${process.env.COMPOSE_FILE}${path.delimiter}${path.join(tmp, "wt", "compose.debug.yaml")}`, commonDir)).toBe(false);
       expect(isWtcComposeFile(composeFileValue([path.join(tmp, "wt", "compose.debug.yaml"), wtcFile])!, commonDir)).toBe(false);
@@ -538,6 +543,21 @@ describeDocker("the rendered override under real docker compose", () => {
     expect(services.db.container_name).toBe("app-wt-1-db");
     // A range is left as it is.
     expect(published("ftp")).toHaveLength(11);
+  });
+
+  it("takes wtc's list and separator from the process over a .env that says otherwise", () => {
+    const base = write(tmp, "app/compose.yaml", 'services:\n  web:\n    image: busybox\n    ports:\n      - "8080:80"\n');
+    const override = write(tmp, "state/app-wt-1.yaml", 'services:\n  web:\n    ports: !override\n      - "28081:80"\n');
+    // The list wtc wrote, and a separator the user set since.
+    write(tmp, "app/.env", `COMPOSE_FILE='${base}${path.delimiter}${override}'\nCOMPOSE_PATH_SEPARATOR=|\n`);
+    const out = runSafe("docker", ["compose", "-p", "app-wt-1", "config", "--format", "json"], {
+      cwd: path.dirname(base),
+      env: { ...process.env, ...composeEnv("app-wt-1", [], composeFileValue([base, override])) },
+      timeoutMs: 20_000,
+    });
+    expect(out).not.toBeNull();
+    const services = (JSON.parse(out!) as { services: Record<string, { ports: { published: string }[] }> }).services;
+    expect(services.web.ports.map((p) => p.published)).toEqual(["28081"]);
   });
 
   it("keeps the old container name as an alias on the default network and on list-form networks", () => {

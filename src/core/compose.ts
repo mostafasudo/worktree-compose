@@ -33,10 +33,11 @@ export type ComposeCallEnv = Record<string, string | undefined>;
  * Process environment for a compose call on a worktree stack: the project
  * name plus every allocated port, so `${VAR}` interpolation resolves to the
  * worktree's ports no matter which env filename is configured — and the
- * stack's `COMPOSE_FILE` when wtc remaps hardcoded settings at runtime.
- * Without one, an inherited `COMPOSE_FILE` that wtc wrote (a worktree's
- * `.env` exported by direnv or similar) is removed: it names another
- * stack's files, or an override that is gone.
+ * stack's `COMPOSE_FILE` when wtc remaps hardcoded settings at runtime,
+ * with the separator it was joined with (both beat a `.env` that says
+ * otherwise). Without one, an inherited `COMPOSE_FILE` that wtc wrote (a
+ * worktree's `.env` exported by direnv or similar) is removed: it names
+ * another stack's files, or an override that is gone.
  */
 export function composeEnv(
   project: string,
@@ -46,7 +47,7 @@ export function composeEnv(
 ): ComposeCallEnv {
   const inherited = process.env[COMPOSE_FILE_VAR];
   const files = composeFile
-    ? { [COMPOSE_FILE_VAR]: composeFile }
+    ? { [COMPOSE_FILE_VAR]: composeFile, COMPOSE_PATH_SEPARATOR: composePathSeparator() }
     : commonDir && inherited && isWtcComposeFile(inherited, commonDir)
       ? { [COMPOSE_FILE_VAR]: undefined }
       : {};
@@ -139,7 +140,9 @@ export function stackAllocations(
           `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} has no free port to move to in worktree ${index} (ports end at 65535), so it stays ${m.defaultPort}.`,
         );
         changed = true;
-      } else if (a.envVar === null && kept.some(([from, to]) => a.port >= from && a.port <= to)) {
+      } else if (kept.some(([from, to]) => a.port >= from && a.port <= to)) {
+        // Also when the port is a variable's (same default port, e.g. tcp
+        // and udp): the hardcoded entry would publish it a second time.
         stays.set(
           m.defaultPort,
           `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} would move to ${a.port}, which this stack already publishes, so it stays ${m.defaultPort}.`,
@@ -183,8 +186,7 @@ export function prepareStack(ctx: WtcContext, target: StackTarget, opts: { write
   const stack = stackAllocations(ctx, target.index, remap.targets);
   const warnings = [...remap.warnings, ...stack.warnings];
 
-  // A separator the worktree's `.env` set since would split the list wrongly.
-  if (!opts.write && fs.existsSync(file) && !separatorConflicts(target.dir)) {
+  if (!opts.write && fs.existsSync(file)) {
     const composeFile = filesWith(file);
     if (composeFile !== null) return { allocations: stack.allocations, composeFile, warnings: [] };
   }
