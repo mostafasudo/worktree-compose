@@ -349,7 +349,7 @@ Each worktree's stack runs as the compose project `{repo}-wt-{index}-{branch}`, 
 
 `wtc` passes `-p <project>` on every compose call, exports `COMPOSE_PROJECT_NAME` and the allocated ports into compose's environment, and writes `COMPOSE_PROJECT_NAME=<project>` into the worktree's root env file (plus `COMPOSE_FILE` when it [remaps hardcoded settings](#runtime-remapping)). With the default `.env`, a plain `docker compose ps` / `logs` / `exec` (or a Makefile) run inside the worktree therefore reaches the same stack on the same ports.
 
-Compose only reads a file named `.env` on its own. With a custom `envFile` such as `.env.development`, pass it explicitly (`docker compose --env-file .env.development ps`) or pass `-p <project>` (the `project` field of `wtc list --json`).
+Compose only reads a file named `.env` on its own. With a custom `envFile` such as `.env.development`, pass it explicitly (`docker compose --env-file .env.development ps`) or pass `-p <project>` (the `project` field of `wtc list --json`). `-p` is enough for `ps`, `logs`, and `exec`; `up` also needs `--env-file`, so it loads the [runtime remapping](#runtime-remapping)'s `COMPOSE_FILE` (or run `wtc restart .`).
 
 `${COMPOSE_PROJECT_NAME}` is also available in `envOverrides` and `workspaceEnvOverrides` values, e.g. `"QUEUE_PREFIX": "${COMPOSE_PROJECT_NAME}-jobs"`.
 
@@ -374,15 +374,16 @@ services:
 - `container_name: !reset null` drops the fixed name, so compose names the containers after the project (`myapp-wt-1-feature-auth-web-1`). The old name stays a network alias on the stack's own networks, so containers that reach the service by it (`DB_HOST=mydb`) still do, and reach this stack's copy. Not on a network every stack shares (fixed `name:` or `external`), where the alias would answer for all of them, nor with `network_mode`.
 - Every compose call on the stack (`start`, `stop`, teardown) runs with `COMPOSE_FILE` listing the compose file, the worktree's own `compose.override.yaml` if it has one, and this file. `wtc` also writes that `COMPOSE_FILE` into the worktree's root env file, so a plain `docker compose up` run from the worktree's root uses the same ports. (From a subdirectory, compose finds the compose file itself and ignores `COMPOSE_FILE` in `.env`.)
 - The file lives in `.git/wtc/compose/`, never in your working tree. `start` rewrites it after syncing the compose file; `stop` and teardown use it as the stack was started. It is deleted when `wtc prune` or `wtc clean` forgets the worktree; a worktree that `clean` keeps also keeps its override, since its env file still lists it.
-- `wtc list` shows a remapped port as `<service>:<default port>`, e.g. `web:8080=28081`. It has no variable, so nothing is written to env files for it and `envOverrides` can't refer to it; give it a variable in the compose file when an env value needs it.
+- `wtc list` shows a remapped port as `<service>:<default port>`, e.g. `web:8080=28081`, as `start` allocates it for that worktree. It has no variable, so nothing is written to env files for it and `envOverrides` can't refer to it; give it a variable in the compose file when an env value needs it.
 
 `!override` and `!reset` need Docker Compose 2.24.4 or newer. `wtc` checks once per run that the engine applies them (`compose config` on a throwaway file; no containers, no daemon) and otherwise remaps nothing and warns as before. It also leaves alone:
 
 - what the worktree's own `compose.override.yaml` (or `docker-compose.override.yml`, …) sets for a service: its `ports` (or `extends`) or `container_name` would be discarded;
 - the ports of a service that uses `extends`, which may inherit ports `wtc` can't see;
 - the ports of a service from an `include:`d file whose ports use variables: compose fills those in from that file's own `.env`, while an override is filled in from the main project's;
-- host port ranges, and a hardcoded port too high to move (it stays as it is, with a warning);
-- everything, when you set `COMPOSE_FILE` yourself: in your environment, the root env file, the main checkout's `.env`, `envOverrides`, or a worktree's own `.env`. A `COMPOSE_FILE` that names `wtc`'s own override (a worktree's `.env` exported by direnv, say) doesn't count.
+- host port ranges, a hardcoded port too high to move, and one whose new port the stack already publishes (they stay as they are, with a warning);
+- a `container_name` another service joins by name (`network_mode: container:mydb`, `volumes_from`, `ipc`, `pid`): an alias can't stand in for the container itself;
+- everything, when you set `COMPOSE_FILE` yourself: in your environment, the root env file, the main checkout's `.env`, `envOverrides`, or a worktree's own `.env` (either `COMPOSE_FILE=` or `COMPOSE_FILE:`), or set a different `COMPOSE_PATH_SEPARATOR` there. A `COMPOSE_FILE` that is exactly the list `wtc` wrote (a worktree's `.env` exported by direnv, say) doesn't count; one you added a file to does.
 
 `wtc doctor` lists what is remapped, or why it can't be.
 

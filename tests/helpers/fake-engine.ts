@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resetEngineCache } from "../../src/compose/engine.js";
+import { resetRemapProbeCache } from "../../src/compose/override.js";
 
 /**
  * A fake `podman` on PATH: `ps -a --format json` prints the JSON array
@@ -59,13 +60,18 @@ if (args[0] === "ps") {
   process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
   process.env.WTC_COMPOSE_COMMAND = "podman compose";
   resetEngineCache();
+  // Every test probes its fake engine afresh (no answer cached by another test).
+  resetRemapProbeCache();
 
   return {
     setContainers: (containers) =>
       fs.writeFileSync(path.join(dir, "ps.json"), JSON.stringify(containers)),
+    // The remap engine probe (`-p wtc-remap-probe config`) is setup, not an operation.
     composeLog: () => {
       const file = path.join(dir, "compose.log");
-      return fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim().split("\n") : [];
+      return fs.existsSync(file)
+        ? fs.readFileSync(file, "utf-8").trim().split("\n").filter((l) => !l.includes("wtc-remap-probe"))
+        : [];
     },
     failCompose: (fail) => {
       const file = path.join(dir, "compose.fail");
@@ -82,6 +88,7 @@ if (args[0] === "ps") {
       if (saved.CMD === undefined) delete process.env.WTC_COMPOSE_COMMAND;
       else process.env.WTC_COMPOSE_COMMAND = saved.CMD;
       resetEngineCache();
+      resetRemapProbeCache();
     },
   };
 }

@@ -4,7 +4,9 @@ import { CommandError, runAsync } from "../utils/exec.js";
 import { composeArgs, composeBin } from "../compose/engine.js";
 import {
   composeFileValue,
+  composePathSeparator,
   envFileComposeFile,
+  envFileValue,
   findUserOverride,
   isUserComposeFile,
   isWtcComposeFile,
@@ -18,6 +20,7 @@ import { allocateWorktreePorts, allocationEnv } from "../ports/allocate.js";
 import { COMPOSE_FILE_VAR, PROJECT_NAME_VAR } from "../sync/env.js";
 import type { RunResult } from "../utils/exec.js";
 import type { ComposeEngine } from "../compose/engine.js";
+import type { RemapTargets } from "../compose/override.js";
 import type { PortAllocation, PortMapping } from "../ports/types.js";
 import type { Reporter } from "../utils/log.js";
 import type { WtcContext } from "../context.js";
@@ -67,6 +70,85 @@ export interface PreparedStack {
 }
 
 /**
+ * What wtc remaps for a stack run from `dir`, without writing anything: the
+ * repository's targets minus what the directory's own compose override sets
+ * for a service — or nothing when its `.env` sets `COMPOSE_FILE` or
+ * `COMPOSE_PATH_SEPARATOR` (a worktree's unmanaged `.env`, with a custom
+ * envFile; the repository's own settings were checked with the context).
+ */
+export function stackRemap(
+  ctx: WtcContext,
+  dir: string,
+  project: string,
+): { targets: RemapTargets | null; warnings: string[] } {
+  if (!ctx.remap) return { targets: null, warnings: [] };
+  const dotenv = path.join(dir, ".env");
+  const separator = envFileValue(dotenv, "COMPOSE_PATH_SEPARATOR");
+  if (
+    isUserComposeFile(envFileComposeFile(dotenv), ctx.repo.commonDir) ||
+    (separator && separator !== composePathSeparator())
+  ) {
+    return {
+      targets: null,
+      warnings: [
+        `${project}: its .env sets ${separator ? "COMPOSE_PATH_SEPARATOR" : "COMPOSE_FILE"}, so wtc does not remap hardcoded ports or container_name for it.`,
+      ],
+    };
+  }
+  const { targets, warnings } = withoutUserOverride(ctx.remap, dir);
+  return { targets: remapIsEmpty(targets) ? null : targets, warnings };
+}
+
+/** Host ports a stack keeps as written: hardcoded ones wtc does not move, ranges whole. */
+function keptHostPorts(mappings: PortMapping[], moving: PortMapping[]): [number, number][] {
+  const moved = new Set(moving);
+  return mappings
+    .filter((m) => m.envVar === null && !moved.has(m))
+    .map((m): [number, number] => [m.defaultPort, m.rangeEnd ?? m.defaultPort]);
+}
+
+/**
+ * The stack's ports: every variable, plus each hardcoded port in `targets`
+ * that can move in this worktree to a port the stack does not already
+ * publish (a hardcoded port it keeps, or one inside a range). Returns the
+ * targets actually remapped and a warning for each port left as it is.
+ */
+export function stackAllocations(
+  ctx: WtcContext,
+  index: number,
+  targets: RemapTargets | null,
+): { allocations: PortAllocation[]; targets: RemapTargets | null; warnings: string[] } {
+  if (!targets) {
+    return { allocations: allocateWorktreePorts(ctx.portMappings, index, ctx.portStride), targets: null, warnings: [] };
+  }
+  const allocations = allocateWorktreePorts(ctx.portMappings, index, ctx.portStride, targets.ports);
+  const kept = keptHostPorts(ctx.portMappings, targets.ports);
+  const stays = new Map<number, string>();
+  for (const m of targets.ports) {
+    if (stays.has(m.defaultPort)) continue;
+    const a = allocations.find((x) => x.defaultPort === m.defaultPort);
+    if (!a) {
+      stays.set(
+        m.defaultPort,
+        `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} has no free port to move to in worktree ${index} (ports end at 65535), so it stays ${m.defaultPort}.`,
+      );
+    } else if (a.envVar === null && kept.some(([from, to]) => a.port >= from && a.port <= to)) {
+      stays.set(
+        m.defaultPort,
+        `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} would move to ${a.port}, which this stack already publishes, so it stays ${m.defaultPort}.`,
+      );
+    }
+  }
+  if (stays.size === 0) return { allocations, targets, warnings: [] };
+  const remaining = { ...targets, ports: targets.ports.filter((m) => !stays.has(m.defaultPort)) };
+  return {
+    allocations: allocations.filter((a) => a.envVar !== null || !stays.has(a.defaultPort)),
+    targets: remapIsEmpty(remaining) ? null : remaining,
+    warnings: [...stays.values()],
+  };
+}
+
+/**
  * Ports and compose files for one stack: the `COMPOSE_FILE` list compose
  * would otherwise pick by itself — the compose file, the directory's own
  * compose override if any — followed by wtc's override (see
@@ -80,11 +162,6 @@ export interface PreparedStack {
  */
 export function prepareStack(ctx: WtcContext, target: StackTarget, opts: { write: boolean }): PreparedStack {
   const file = overridePath(ctx.repo.commonDir, target.project);
-  const plain = (warnings: string[]): PreparedStack => ({
-    allocations: allocateWorktreePorts(ctx.portMappings, target.index, ctx.portStride),
-    composeFile: null,
-    warnings,
-  });
   const filesWith = (override: string): string | null => {
     const userOverride = findUserOverride(target.dir);
     return composeFileValue([
@@ -93,53 +170,33 @@ export function prepareStack(ctx: WtcContext, target: StackTarget, opts: { write
       override,
     ]);
   };
+  const remap = stackRemap(ctx, target.dir, target.project);
+  const stack = stackAllocations(ctx, target.index, remap.targets);
+  const warnings = [...remap.warnings, ...stack.warnings];
 
   if (!opts.write && fs.existsSync(file)) {
     const composeFile = filesWith(file);
-    if (composeFile !== null) {
-      return {
-        allocations: allocateWorktreePorts(ctx.portMappings, target.index, ctx.portStride, ctx.remap?.ports),
-        composeFile,
-        warnings: [],
-      };
-    }
+    if (composeFile !== null) return { allocations: stack.allocations, composeFile, warnings: [] };
   }
-  if (!ctx.remap) return plain([]);
-
-  // The repository's own COMPOSE_FILE settings were checked with the
-  // context; a worktree's unmanaged `.env` (custom envFile) may have one.
-  if (isUserComposeFile(envFileComposeFile(path.join(target.dir, ".env")), ctx.repo.commonDir)) {
-    return plain([
-      `${target.project}: its .env sets COMPOSE_FILE, so wtc does not remap hardcoded ports or container_name for it.`,
-    ]);
-  }
-  const { targets, warnings } = withoutUserOverride(ctx.remap, target.dir);
-  if (remapIsEmpty(targets)) return plain(warnings);
+  if (!stack.targets) return { allocations: stack.allocations, composeFile: null, warnings };
 
   const composeFile = filesWith(file);
   if (composeFile === null) {
-    return plain([
-      ...warnings,
-      `A path of ${target.project}'s compose files contains the COMPOSE_FILE separator, so wtc does not remap hardcoded ports or container_name for it.`,
-    ]);
+    return {
+      allocations: allocateWorktreePorts(ctx.portMappings, target.index, ctx.portStride),
+      composeFile: null,
+      warnings: [
+        ...warnings,
+        `A path of ${target.project}'s compose files contains the COMPOSE_FILE separator, so wtc does not remap hardcoded ports or container_name for it.`,
+      ],
+    };
   }
-  const allocations = allocateWorktreePorts(ctx.portMappings, target.index, ctx.portStride, targets.ports);
-  const stuck = new Map<number, PortMapping>();
-  for (const m of targets.ports) {
-    if (!allocations.some((a) => a.defaultPort === m.defaultPort)) stuck.set(m.defaultPort, m);
+  // `stop`/teardown of a stack started before wtc remapped (or whose file
+  // was deleted) recreate it.
+  if (opts.write || !fs.existsSync(file)) {
+    writeOverride(file, renderOverride(target.project, ctx.composeFile, stack.targets, stack.allocations));
   }
-  for (const m of stuck.values()) {
-    warnings.push(
-      `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} has no free port to move to in worktree ${target.index} (ports end at 65535), so it stays ${m.defaultPort}.`,
-    );
-  }
-  if (opts.write) {
-    writeOverride(file, renderOverride(target.project, ctx.composeFile, targets, allocations));
-  } else if (!fs.existsSync(file)) {
-    // Started before wtc remapped (or the file was deleted): recreate it.
-    writeOverride(file, renderOverride(target.project, ctx.composeFile, targets, allocations));
-  }
-  return { allocations, composeFile, warnings };
+  return { allocations: stack.allocations, composeFile, warnings };
 }
 
 export interface ComposeCallOptions {

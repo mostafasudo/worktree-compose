@@ -14,7 +14,8 @@ import {
 } from "../compose/isolation.js";
 import { decideRemap } from "../compose/override.js";
 import { extractPortMappings } from "../ports/extract.js";
-import { allocateWorktreePorts, portLabel } from "../ports/allocate.js";
+import { portLabel } from "../ports/allocate.js";
+import { stackAllocations, stackRemap } from "./compose.js";
 import { DEFAULT_ENV_FILE, findEnvSource } from "../sync/env.js";
 import { getRepoInfo } from "../git/repo.js";
 import { ENGINE_PROBE_TIMEOUT_MS, runSafe } from "../utils/exec.js";
@@ -333,7 +334,9 @@ export async function doctor(io: CoreIo): Promise<DoctorResult> {
     probed++;
     let allocations;
     try {
-      allocations = allocateWorktreePorts(ctx.portMappings, wt.index, ctx.portStride, remapped);
+      // As start allocates them: this worktree's own compose override counts.
+      const withRemap = { ...ctx, remap: remap.targets };
+      allocations = stackAllocations(withRemap, wt.index, stackRemap(withRemap, wt.path, wt.project).targets).allocations;
     } catch (err) {
       add({ status: "fail", title: `Worktree ${wt.index}: cannot allocate ports`, detail: message(err) });
       continue;

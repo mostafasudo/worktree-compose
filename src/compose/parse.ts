@@ -72,6 +72,37 @@ function parseServiceNetworks(networks: unknown): string[] | undefined {
   return undefined;
 }
 
+/** `extends: base` or `extends: { service, file }`. */
+function parseExtends(ext: unknown): ComposeService["extendsFrom"] {
+  if (typeof ext === "string" && ext) return { service: ext };
+  if (ext && typeof ext === "object") {
+    const o = ext as Record<string, unknown>;
+    if (typeof o.service === "string" && o.service) {
+      return { service: o.service, ...(typeof o.file === "string" && o.file ? { file: o.file } : {}) };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Container names a service joins by name: `network_mode`, `ipc` or `pid`
+ * set to `container:<name>`, and `volumes_from: [container:<name>[:ro]]`.
+ */
+function parseContainerRefs(s: Record<string, unknown>): string[] {
+  const refs: string[] = [];
+  const add = (v: unknown) => {
+    if (typeof v === "string" && v.startsWith("container:")) {
+      const name = v.slice("container:".length).split(":")[0];
+      if (name) refs.push(name);
+    }
+  };
+  add(s.network_mode);
+  add(s.ipc);
+  add(s.pid);
+  if (Array.isArray(s.volumes_from)) s.volumes_from.forEach(add);
+  return refs;
+}
+
 /** Compose's `!reset` / `!override` tag on a service key, when there is one. */
 type KeyTag = (service: string, key: string) => string | undefined;
 
@@ -92,14 +123,20 @@ function parseServicesObject(
     // An empty service definition (`foo:` with no body) parses to null.
     const s = svc ?? {};
     const portsTag = tagOf(name, "ports");
+    // `!reset` clears the attribute whatever its payload says.
+    const portsReset = portsTag === "!reset";
     const nameReset = tagOf(name, "container_name") === "!reset";
     const networks = parseServiceNetworks(s.networks);
+    const extendsFrom = parseExtends(s.extends);
+    const containerRefs = parseContainerRefs(s);
     return {
       name,
-      ports: parseServicePorts(s.ports),
-      portEntries: Array.isArray(s.ports) ? uniqueEntries(s.ports) : [],
-      ...(portsTag === "!override" || portsTag === "!reset" ? { portsReplace: true } : {}),
+      ports: portsReset ? [] : parseServicePorts(s.ports),
+      portEntries: portsReset ? [] : Array.isArray(s.ports) ? uniqueEntries(s.ports) : [],
+      ...(portsTag === "!override" || portsReset ? { portsReplace: true } : {}),
       ...(s.extends != null ? { extends: true } : {}),
+      ...(extendsFrom ? { extendsFrom } : {}),
+      ...(containerRefs.length > 0 ? { containerRefs } : {}),
       ...(networks ? { networks } : {}),
       ...(s.network_mode != null ? { networkMode: true } : {}),
       build: parseServiceBuild(s.build),
@@ -257,6 +294,10 @@ function mergeService(
       : uniqueEntries([...(base.portEntries ?? []), ...(override.portEntries ?? [])]),
     ...(base.portsReplace || override.portsReplace ? { portsReplace: true } : {}),
     ...(base.extends || override.extends ? { extends: true } : {}),
+    ...((override.extendsFrom ?? base.extendsFrom) ? { extendsFrom: override.extendsFrom ?? base.extendsFrom } : {}),
+    ...(base.containerRefs || override.containerRefs
+      ? { containerRefs: [...new Set([...(base.containerRefs ?? []), ...(override.containerRefs ?? [])])] }
+      : {}),
     ...(base.networks || override.networks ? { networks } : {}),
     ...(base.networkMode || override.networkMode ? { networkMode: true } : {}),
     build: override.build ?? base.build,

@@ -7,6 +7,8 @@ export interface PortMapping {
   raw: string;
   /** A host port range (`8000-8010:8000-8010`): never remapped. */
   range?: boolean;
+  /** Last host port of a range (`defaultPort` is the first). */
+  rangeEnd?: number;
 }
 
 export interface PortAllocation {

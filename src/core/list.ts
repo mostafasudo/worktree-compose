@@ -1,5 +1,7 @@
+import fs from "node:fs";
 import { buildContext } from "../context.js";
-import { allocatableMappings, allocateWorktreePorts, portsByLabel } from "../ports/allocate.js";
+import { allocatableMappings, portsByLabel } from "../ports/allocate.js";
+import { stackAllocations, stackRemap } from "./compose.js";
 import { stackStatus } from "../compose/status.js";
 import type { StackStatus } from "../compose/status.js";
 import type { PortAllocation } from "../ports/types.js";
@@ -38,12 +40,18 @@ export interface ListResult {
   isolationWarnings: string[];
 }
 
+/**
+ * A stack's ports as `start` allocates them, run from `dir` (its worktree,
+ * or the main checkout when the worktree is gone): read-only.
+ */
 function safeAllocate(
   ctx: ReturnType<typeof buildContext>,
   index: number,
+  dir: string,
+  project: string,
 ): PortAllocation[] {
   try {
-    return allocateWorktreePorts(ctx.portMappings, index, ctx.portStride, ctx.remap?.ports);
+    return stackAllocations(ctx, index, stackRemap(ctx, dir, project).targets).allocations;
   } catch {
     return [];
   }
@@ -75,7 +83,7 @@ export function listWorktrees(io: CoreIo): ListResult {
 
   const rows: ListRow[] = [];
   for (const wt of ctx.worktrees) {
-    const allocations = safeAllocate(ctx, wt.index);
+    const allocations = safeAllocate(ctx, wt.index, wt.path, wt.project);
     const state = stacks.state(wt.project);
     rows.push({
       index: wt.index,
@@ -92,7 +100,7 @@ export function listWorktrees(io: CoreIo): ListResult {
     });
   }
   for (const u of ctx.unavailable) {
-    const allocations = safeAllocate(ctx, u.index);
+    const allocations = safeAllocate(ctx, u.index, u.path, u.project);
     const state = stacks.state(u.project);
     rows.push({
       index: u.index,
@@ -109,7 +117,7 @@ export function listWorktrees(io: CoreIo): ListResult {
     });
   }
   for (const o of ctx.orphans) {
-    const allocations = safeAllocate(ctx, o.index);
+    const allocations = safeAllocate(ctx, o.index, fs.existsSync(o.path) ? o.path : ctx.repoRoot, o.project);
     const state = stacks.state(o.project);
     rows.push({
       index: o.index,

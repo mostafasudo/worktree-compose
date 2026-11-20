@@ -89,7 +89,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     const result = await startWorktrees({ worktrees: ["feat"], build: false }, reporter, { live: false, cwd: root });
 
     expect(result.started[0].ports).toEqual({ "web:8080": 28081, API_PORT: 23001 });
-    expect(engine.composeLog()).toEqual(["-p wtc-remap-probe config", `-p ${project} up -d`]);
+    expect(engine.composeLog()).toEqual([`-p ${project} up -d`]);
     const composeFile = files(path.join(wt, "compose.yaml"), override());
     expect(calls()).toEqual([{ args: `-p ${project} up -d`, composeFile }]);
 
@@ -101,7 +101,8 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
 
     // Plain `docker compose` in the worktree loads the same files.
     const env = fs.readFileSync(path.join(wt, ".env"), "utf-8");
-    expect(env).toContain(`COMPOSE_FILE=${composeFile}\n`);
+    // Single-quoted: compose reads the paths literally, `$` included.
+    expect(env).toContain(`COMPOSE_FILE='${composeFile}'\n`);
     expect(env).toContain(`COMPOSE_PROJECT_NAME=${project}\n`);
     expect(env).toContain("API_PORT=23001\n");
     expect(env).not.toMatch(/WEB/);
@@ -159,7 +160,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
   it("keeps remapping when the shell exported the worktree's COMPOSE_FILE (direnv)", async () => {
     engine.setComposeHook(remapHook(base));
     await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: root });
-    const exported = /^COMPOSE_FILE=(.*)$/m.exec(fs.readFileSync(path.join(wt, ".env"), "utf-8"))![1];
+    const exported = /^COMPOSE_FILE='(.*)'$/m.exec(fs.readFileSync(path.join(wt, ".env"), "utf-8"))![1];
     process.env.COMPOSE_FILE = exported;
 
     const reporter = new CollectingReporter();
@@ -231,7 +232,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     engine.setComposeHook(remapHook(base));
     await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: root });
     // direnv exported the worktree's .env; then the hardcoded settings were fixed.
-    process.env.COMPOSE_FILE = /^COMPOSE_FILE=(.*)$/m.exec(fs.readFileSync(path.join(wt, ".env"), "utf-8"))![1];
+    process.env.COMPOSE_FILE = /^COMPOSE_FILE='(.*)'$/m.exec(fs.readFileSync(path.join(wt, ".env"), "utf-8"))![1];
     write(root, "compose.yaml", 'services:\n  web:\n    image: nginx\n    ports:\n      - "${WEB_PORT:-8080}:80"\n');
 
     await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: wt });
@@ -278,7 +279,7 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
       composeFile: files(path.join(wt, "compose.yaml"), override()),
     });
     expect(fs.existsSync(override())).toBe(true);
-    expect(fs.readFileSync(path.join(wt, ".env"), "utf-8")).toContain(`COMPOSE_FILE=${files(path.join(wt, "compose.yaml"), override())}`);
+    expect(fs.readFileSync(path.join(wt, ".env"), "utf-8")).toContain(`COMPOSE_FILE='${files(path.join(wt, "compose.yaml"), override())}'`);
   });
 
   it("starts with a hardcoded port that has nowhere to move, leaving it as it is", async () => {
@@ -291,7 +292,46 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
     expect(result.started[0].ports).toEqual({ "web:8080": 28081, API_PORT: 23001 });
     expect(fs.readFileSync(override(), "utf-8")).not.toContain("edge");
     expect(reporter.lines).toContain(
-      '⚠ Service "edge": hardcoded host port 65500 has no free port to move to in worktree 1 (ports end at 65535), so it stays 65500.',
+      '⚠ Service "edge": hardcoded host port 65500 is too high to move (ports end at 65535), so wtc leaves it.',
+    );
+    // Still reported as not isolated: every stack publishes 65500.
+    expect(reporter.lines.some((l) => l.startsWith('⚠ Service "edge" uses a raw port mapping (65500:65500)'))).toBe(true);
+  });
+
+  it("list shows only the ports start remaps for a worktree whose own compose override sets them", () => {
+    engine.setComposeHook(remapHook(base));
+    write(wt, "compose.override.yaml", 'services:\n  web:\n    ports:\n      - "9090:80"\n');
+    const list = listWorktrees({ live: false, cwd: root });
+    expect(list.rows[0].ports).toEqual({ API_PORT: 23001 });
+  });
+
+  it("leaves a hardcoded port alone when its new port is one the stack keeps (a range)", async () => {
+    engine.setComposeHook(remapHook(base));
+    write(root, "compose.yaml", COMPOSE + '  rtp:\n    image: x\n    ports:\n      - "28081-28082:81-82"\n');
+    const reporter = new CollectingReporter();
+
+    const result = await startWorktrees({ worktrees: ["feat"], build: false }, reporter, { live: false, cwd: root });
+
+    expect(result.started[0].ports).toEqual({ API_PORT: 23001 });
+    const yaml = fs.readFileSync(override(), "utf-8");
+    expect(yaml).not.toContain("ports:");
+    expect(yaml).toContain("container_name: !reset null");
+    expect(reporter.lines).toContain(
+      '⚠ Service "web": hardcoded host port 8080 would move to 28081, which this stack already publishes, so it stays 8080.',
+    );
+  });
+
+  it("leaves a stack alone whose worktree .env sets another COMPOSE_PATH_SEPARATOR", async () => {
+    engine.setComposeHook(remapHook(base));
+    write(root, ".wtcrc.json", JSON.stringify({ envFile: ".env.local" }));
+    write(wt, ".env", "COMPOSE_PATH_SEPARATOR=|\n");
+    const reporter = new CollectingReporter();
+
+    await startWorktrees({ worktrees: ["feat"], build: false }, reporter, { live: false, cwd: root });
+
+    expect(calls()[0].composeFile).toBeNull();
+    expect(reporter.lines).toContain(
+      `⚠ ${project}: its .env sets COMPOSE_PATH_SEPARATOR, so wtc does not remap hardcoded ports or container_name for it.`,
     );
   });
 });

@@ -165,6 +165,30 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
     ]);
   });
 
+  it("leaves a port too high to move, and a container name another service joins by name", () => {
+    const { composeFile, mappings } = model(
+      [
+        "services:",
+        "  edge:",
+        "    image: x",
+        '    ports: ["65500:65500"]',
+        "  db:",
+        "    image: postgres",
+        "    container_name: mydb",
+        "  vpn:",
+        "    image: x",
+        "    network_mode: container:mydb",
+        "",
+      ].join("\n"),
+    );
+    const { targets, skipped } = remapCandidates(composeFile, mappings);
+    expect(targets).toEqual({ ports: [], containerNames: [] });
+    expect(skipped).toEqual([
+      'Service "edge": hardcoded host port 65500 is too high to move (ports end at 65535), so wtc leaves it.',
+      'Service "db": service "vpn" joins container:mydb by name, so wtc does not drop its container_name.',
+    ]);
+  });
+
   it("renders the whole ports list with !override, remapping only hardcoded host ports, and !reset for container_name", () => {
     const { composeFile, mappings } = model();
     const { targets } = remapCandidates(composeFile, mappings);
@@ -224,6 +248,41 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
     expect(doc.services.templated.networks).toBeUndefined();
   });
 
+  it("follows extends in the same file before giving the old name an alias", () => {
+    const doc = render(
+      [
+        "services:",
+        "  hostnet:",
+        "    image: x",
+        "    network_mode: host",
+        "  backend-base:",
+        "    image: x",
+        "    networks: [backend]",
+        "  a:",
+        "    extends: hostnet",
+        "    container_name: aname",
+        "  b:",
+        "    extends: backend-base",
+        "    container_name: bname",
+        "  c:",
+        "    extends:",
+        "      file: other.yaml",
+        "      service: web",
+        "    container_name: cname",
+        "networks:",
+        "  backend:",
+        "",
+      ].join("\n"),
+    );
+    // Inherited network_mode: compose rejects networks next to it.
+    expect(doc.services.a.networks).toBeUndefined();
+    // Inherited networks: the alias goes there, not onto default.
+    expect(doc.services.b.networks).toEqual({ backend: { aliases: ["bname"] } });
+    // Another file: wtc cannot see what it brings.
+    expect(doc.services.c.networks).toBeUndefined();
+    expect("container_name" in doc.services.c).toBe(true);
+  });
+
   it("finds the compose override compose would load, in compose's order", () => {
     expect(findUserOverride(tmp)).toBeNull();
     write(tmp, "docker-compose.override.yml", "services: {}\n");
@@ -277,6 +336,8 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
   it("reads the COMPOSE_FILE an env file sets", () => {
     expect(envFileComposeFile(write(tmp, "a.env", "X=1\nCOMPOSE_FILE=compose.yaml:dev.yaml\n"))).toBe("compose.yaml:dev.yaml");
     expect(envFileComposeFile(write(tmp, "b.env", 'export COMPOSE_FILE="compose.yaml"\n'))).toBe("compose.yaml");
+    // compose's dotenv parser also takes `KEY: value`.
+    expect(envFileComposeFile(write(tmp, "d.env", "COMPOSE_FILE: compose.yaml:dev.yaml\n"))).toBe("compose.yaml:dev.yaml");
     expect(envFileComposeFile(write(tmp, "c.env", "# COMPOSE_FILE=x\nMY_COMPOSE_FILE=y\n"))).toBeNull();
     expect(envFileComposeFile(path.join(tmp, "missing.env"))).toBeNull();
     expect(envFileComposeFile(null)).toBeNull();
@@ -338,6 +399,9 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
       expect(decideRemap(inputs(() => ok, { envOverrides: { COMPOSE_FILE: "a.yaml" } })).problem).toMatch(
         /envOverrides sets COMPOSE_FILE/,
       );
+      // Another separator would split wtc's list into one missing file.
+      const sep = write(tmp, "sep.env", "COMPOSE_PATH_SEPARATOR=|\n");
+      expect(decideRemap(inputs(() => ok, { envFiles: [sep] })).problem).toMatch(/sep\.env sets COMPOSE_PATH_SEPARATOR/);
 
       process.env.COMPOSE_FILE = "compose.yaml";
       const decision = decideRemap(inputs(() => ok));
@@ -351,8 +415,16 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
         path.join(tmp, "wt", "compose.yaml"),
         overridePath(path.join(tmp, ".git"), "app-wt-1-feat"),
       ])!;
-      expect(isWtcComposeFile(process.env.COMPOSE_FILE, path.join(tmp, ".git"))).toBe(true);
-      expect(isWtcComposeFile(path.join(tmp, "compose.dev.yaml"), path.join(tmp, ".git"))).toBe(false);
+      const commonDir = path.join(tmp, ".git");
+      const wtcFile = overridePath(commonDir, "app-wt-1-feat");
+      expect(isWtcComposeFile(process.env.COMPOSE_FILE, commonDir)).toBe(true);
+      expect(
+        isWtcComposeFile(composeFileValue([path.join(tmp, "wt", "compose.yaml"), path.join(tmp, "wt", "compose.override.yaml"), wtcFile])!, commonDir),
+      ).toBe(true);
+      // Anything else in the list makes it the user's.
+      expect(isWtcComposeFile(`${process.env.COMPOSE_FILE}${path.delimiter}${path.join(tmp, "wt", "compose.debug.yaml")}`, commonDir)).toBe(false);
+      expect(isWtcComposeFile(composeFileValue([path.join(tmp, "wt", "compose.debug.yaml"), wtcFile])!, commonDir)).toBe(false);
+      expect(isWtcComposeFile(path.join(tmp, "compose.dev.yaml"), commonDir)).toBe(false);
       const decision = decideRemap(inputs(() => ok));
       expect(decision.problem).toBeNull();
       expect(decision.targets).not.toBeNull();

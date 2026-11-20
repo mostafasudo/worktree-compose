@@ -77,6 +77,15 @@ export interface InjectOptions {
 export const COMPOSE_FILE_VAR = "COMPOSE_FILE";
 
 /**
+ * A value compose reads back exactly: single-quoted dotenv values are
+ * literal, so a `$` in a path is not interpolated. (A path with a `'` in
+ * it is written as it is.)
+ */
+export function literalEnvValue(value: string): string {
+  return value.includes("'") ? value : `'${value}'`;
+}
+
+/**
  * All keys that should be written for a target: the project name and
  * compose file list (root target), allocated port variables, then the
  * target's overrides (already interpolated). Overrides win on key
@@ -95,7 +104,7 @@ export function buildOverrideEntries(
     if (opts.writeProjectName) entries[PROJECT_NAME_VAR] = opts.projectName;
     values.set(PROJECT_NAME_VAR, opts.projectName);
   }
-  if (opts.composeFile) entries[COMPOSE_FILE_VAR] = opts.composeFile;
+  if (opts.composeFile) entries[COMPOSE_FILE_VAR] = literalEnvValue(opts.composeFile);
 
   for (const a of allocations) {
     if (a.envVar === null) continue;

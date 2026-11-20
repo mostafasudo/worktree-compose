@@ -68,14 +68,20 @@ function resolveEnvVar(segment: string): {
   return { envVar: match[1], defaultPort: parseInt(match[2], 10) };
 }
 
-function resolvePort(segment: string): number | null {
-  const n = parseInt(segment, 10);
-  return isNaN(n) ? null : n;
+/** `8000-8010`: a port range, which no single allocated port can replace. */
+function rangeOf(segment: string): [number, number] | null {
+  const m = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(segment);
+  return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
-/** `8000-8010`: a port range, which no single allocated port can replace. */
-function isRange(segment: string): boolean {
-  return /^\s*\d+\s*-\s*\d+\s*$/.test(segment);
+/**
+ * A port number, or the first port of a range. Anything else — `${VAR}`
+ * without a default, `8000-${END:-8010}` — is null: its numeric prefix is
+ * not the port compose publishes.
+ */
+function resolvePort(segment: string): number | null {
+  if (/^\s*\d+\s*$/.test(segment)) return Number(segment.trim());
+  return rangeOf(segment)?.[0] ?? null;
 }
 
 export function extractPortMappings(
@@ -105,6 +111,7 @@ export function extractPortMappings(
         });
       } else {
         const hostPort = resolvePort(split.host);
+        const hostRange = rangeOf(split.host);
         // Host port 0 asks the engine for any free port: it never collides.
         if (hostPort !== null && hostPort !== 0) {
           mappings.push({
@@ -113,7 +120,8 @@ export function extractPortMappings(
             defaultPort: hostPort,
             containerPort,
             raw,
-            ...(isRange(split.host) || isRange(split.container) ? { range: true } : {}),
+            ...(hostRange || rangeOf(split.container) ? { range: true } : {}),
+            ...(hostRange ? { rangeEnd: hostRange[1] } : {}),
           });
         }
       }

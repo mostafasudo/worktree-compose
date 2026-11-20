@@ -11,6 +11,10 @@ export interface ComposeService {
   portsReplace?: boolean;
   /** The service uses `extends:`, so it may inherit ports wtc cannot see. */
   extends?: boolean;
+  /** What `extends:` names: a service, in another file when `file` is set. */
+  extendsFrom?: { service: string; file?: string };
+  /** Container names the service joins by name (`network_mode: container:<name>`, `volumes_from`, …). */
+  containerRefs?: string[];
   /** Networks the service joins (absent: only the project's `default`). */
   networks?: string[];
   /** The service sets `network_mode` (host, none, another container…): no networks of its own. */

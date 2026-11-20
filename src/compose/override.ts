@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { Document, parseDocument } from "yaml";
 import { ENGINE_PROBE_TIMEOUT_MS, runSafe } from "../utils/exec.js";
+import { allocatePort } from "../ports/allocate.js";
 import { portSegments } from "../ports/extract.js";
 import { stateDir } from "../state/registry.js";
 import { COMPOSE_FILE_VAR } from "../sync/env.js";
+import { COMPOSE_FILENAMES } from "./detect.js";
 import { composeArgs, composeBin } from "./engine.js";
 import { isProjectScopedName, portEntryString } from "./parse.js";
 import type { ComposeEngine } from "./engine.js";
@@ -59,14 +61,28 @@ function portsUseVariables(svc: ComposeService): boolean {
   return (svc.portEntries ?? svc.ports).some((e) => (JSON.stringify(e) ?? "").includes("$"));
 }
 
+/** Whether a hardcoded host port can move at all: allocated ports end at 65535. */
+function canMove(port: number): boolean {
+  try {
+    allocatePort(port, 1, 1);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Settings wtc could remap: hardcoded host ports (not ranges) and fixed
- * container names, plus why some hardcoded ports are left alone:
+ * container names, plus why some are left alone:
  * - a service that uses `extends` may inherit ports wtc cannot see, which
  *   a replaced list would drop;
  * - a service from an included file whose ports use variables: compose
  *   fills those in from that file's own env (its directory's `.env`), but
- *   an override is interpolated with the main project's.
+ *   an override is interpolated with the main project's;
+ * - a port too high to move (above 65435);
+ * - a container name another service joins by name (`network_mode:
+ *   container:<name>`, `volumes_from`, `ipc`, `pid`): an alias cannot stand
+ *   in for a container identity.
  */
 export function remapCandidates(
   composeFile: ComposeFile,
@@ -89,17 +105,35 @@ export function remapCandidates(
       );
     }
   }
-  return {
-    targets: {
-      ports: mappings.filter((m) => m.envVar === null && !m.range && !keep.has(m.serviceName)),
-      containerNames: composeFile.services.flatMap((s) =>
-        s.containerName && !isProjectScopedName(s.containerName)
-          ? [{ service: s.name, name: s.containerName }]
-          : [],
-      ),
-    },
-    skipped,
-  };
+  const stuck = new Set<number>();
+  const ports = mappings.filter((m) => {
+    if (m.envVar !== null || m.range || keep.has(m.serviceName)) return false;
+    if (canMove(m.defaultPort)) return true;
+    if (!stuck.has(m.defaultPort)) {
+      stuck.add(m.defaultPort);
+      skipped.push(
+        `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} is too high to move (ports end at 65535), so wtc leaves it.`,
+      );
+    }
+    return false;
+  });
+
+  const joinedBy = new Map<string, string>();
+  for (const s of composeFile.services) {
+    for (const ref of s.containerRefs ?? []) if (!joinedBy.has(ref)) joinedBy.set(ref, s.name);
+  }
+  const containerNames = composeFile.services.flatMap((s) => {
+    if (!s.containerName || isProjectScopedName(s.containerName)) return [];
+    const by = joinedBy.get(s.containerName);
+    if (by) {
+      skipped.push(
+        `Service "${s.name}": service "${by}" joins container:${s.containerName} by name, so wtc does not drop its container_name.`,
+      );
+      return [];
+    }
+    return [{ service: s.name, name: s.containerName }];
+  });
+  return { targets: { ports, containerNames }, skipped };
 }
 
 /** The compose override file compose would load from `dir` by itself, or null. */
@@ -176,7 +210,9 @@ export function withoutUserOverride(
       warnings.push(`Service "${c.service}": ${name} also sets container_name, so wtc does not drop it.`);
       return [];
     }
-    return sets(c.service, "networks") || sets(c.service, "network_mode") ? [{ ...c, noAlias: true }] : [c];
+    return sets(c.service, "networks") || sets(c.service, "network_mode") || sets(c.service, "extends")
+      ? [{ ...c, noAlias: true }]
+      : [c];
   });
   return {
     targets: { ports: targets.ports.filter((m) => !skippedPorts.has(m.serviceName)), containerNames },
@@ -184,8 +220,8 @@ export function withoutUserOverride(
   };
 }
 
-/** The separator compose splits `COMPOSE_FILE` on. */
-function composePathSeparator(): string {
+/** The separator compose splits `COMPOSE_FILE` on (wtc's calls and the env files it writes). */
+export function composePathSeparator(): string {
   return process.env.COMPOSE_PATH_SEPARATOR || path.delimiter;
 }
 
@@ -195,8 +231,12 @@ export function composeFileValue(files: string[]): string | null {
   return files.some((f) => f.includes(sep)) ? null : files.join(sep);
 }
 
-/** The value an env file assigns to `COMPOSE_FILE` (its last assignment, unquoted), or null. */
-export function envFileComposeFile(file: string | null): string | null {
+/**
+ * The value an env file assigns to `key`: its last assignment, in either
+ * form compose's dotenv parser accepts (`KEY=value`, `KEY: value`),
+ * unquoted. Null when the file or the key is missing.
+ */
+export function envFileValue(file: string | null, key: string): string | null {
   if (!file) return null;
   let text: string;
   try {
@@ -205,10 +245,23 @@ export function envFileComposeFile(file: string | null): string | null {
     return null;
   }
   let value: string | null = null;
-  for (const m of text.matchAll(/^[ \t]*(?:export[ \t]+)?COMPOSE_FILE[ \t]*=(.*)$/gm)) {
+  for (const m of text.matchAll(new RegExp(`^[ \\t]*(?:export[ \\t]+)?${key}[ \\t]*[=:](.*)$`, "gm"))) {
     value = m[1].trim().replace(/^(['"])(.*)\1$/, "$2");
   }
   return value;
+}
+
+/** The `COMPOSE_FILE` an env file sets, or null. */
+export function envFileComposeFile(file: string | null): string | null {
+  return envFileValue(file, COMPOSE_FILE_VAR);
+}
+
+/** Why an env file's `COMPOSE_PATH_SEPARATOR` would split wtc's list differently, or null. */
+function separatorConflict(file: string | null): string | null {
+  const sep = envFileValue(file, "COMPOSE_PATH_SEPARATOR");
+  return sep && sep !== composePathSeparator()
+    ? `${path.basename(file!)} sets COMPOSE_PATH_SEPARATOR, which would split wtc's COMPOSE_FILE differently`
+    : null;
 }
 
 /** Where wtc keeps a stack's override: inside the git directory, never committed. */
@@ -217,16 +270,21 @@ export function overridePath(commonDir: string, project: string): string {
 }
 
 /**
- * True when a `COMPOSE_FILE` value lists one of wtc's own overrides: the
- * line wtc wrote into a worktree's env file, exported into the shell by a
- * tool that loads `.env` (direnv's `dotenv`, mise, autoenv). That is not a
- * file list of the user's, so it must not switch remapping off.
+ * True when a `COMPOSE_FILE` value is exactly a list wtc writes — the
+ * compose file, the directory's own compose override if any, then one of
+ * wtc's overrides: the line wtc wrote into a worktree's env file, exported
+ * into the shell by a tool that loads `.env` (direnv's `dotenv`, mise,
+ * autoenv). That is not a file list of the user's, so it must not switch
+ * remapping off. A list with anything else in it (the user appended a
+ * file) is the user's.
  */
 export function isWtcComposeFile(value: string, commonDir: string): boolean {
   const dir = path.dirname(overridePath(commonDir, "_"));
-  return value
-    .split(composePathSeparator())
-    .some((f) => path.resolve(f).startsWith(dir + path.sep));
+  const files = value.split(composePathSeparator()).map((f) => f.trim()).filter(Boolean);
+  if (files.length < 2 || files.length > 3) return false;
+  if (path.dirname(path.resolve(files[files.length - 1])) !== dir) return false;
+  if (!COMPOSE_FILENAMES.includes(path.basename(files[0]))) return false;
+  return files.length === 2 || USER_OVERRIDE_FILENAMES.includes(path.basename(files[1]));
 }
 
 /** A `COMPOSE_FILE` the user set (not one wtc wrote), from a value. */
@@ -266,15 +324,32 @@ function withHostPort(entry: unknown, port: number): unknown {
  * Networks on which a service whose container_name is dropped keeps the old
  * name as an alias, so containers that reach it by that name still do. Only
  * the stack's own networks: on one shared by every stack (fixed `name:`,
- * `external`) the alias would answer for several stacks at once.
+ * `external`) the alias would answer for several stacks at once. What a
+ * service inherits through `extends` counts: a `network_mode` there leaves
+ * no networks (compose rejects `networks` next to it), and its `networks`
+ * add to the service's. When `extends` points into another file, wtc
+ * cannot see what it brings, so no alias.
  */
 function aliasNetworks(composeFile: ComposeFile, svc: ComposeService, name: string): string[] {
-  // network_mode leaves no networks to alias on; a `${…}` name would be
-  // interpolated with the main project's env, not the name's own.
-  if (svc.networkMode || name.includes("$")) return [];
+  // A `${…}` name would be interpolated with the main project's env, not the name's own.
+  if (name.includes("$")) return [];
+  const byName = new Map(composeFile.services.map((s) => [s.name, s]));
+  const networks = new Set<string>();
+  const seen = new Set<string>();
+  for (let s: ComposeService | undefined = svc; s; ) {
+    if (seen.has(s.name) || s.networkMode) return [];
+    seen.add(s.name);
+    for (const n of s.networks ?? []) networks.add(n);
+    if (!s.extendsFrom) {
+      if (s.extends) return []; // an `extends` form wtc does not read
+      break;
+    }
+    if (s.extendsFrom.file) return [];
+    s = byName.get(s.extendsFrom.service);
+    if (!s) return [];
+  }
   const shared = new Set(composeFile.sharedNetworks.map((n) => n.key));
-  const networks = svc.networks && svc.networks.length > 0 ? svc.networks : ["default"];
-  return networks.filter((n) => !shared.has(n));
+  return (networks.size > 0 ? [...networks] : ["default"]).filter((n) => !shared.has(n));
 }
 
 /**
@@ -477,6 +552,8 @@ export function decideRemap(inputs: RemapInputs): RemapDecision {
     if (isUserComposeFile(envFileComposeFile(file), inputs.commonDir)) {
       return cannot(`${path.basename(file!)} sets COMPOSE_FILE, and wtc would replace it`);
     }
+    const conflict = separatorConflict(file);
+    if (conflict) return cannot(conflict);
   }
   if (inputs.envOverrides && COMPOSE_FILE_VAR in inputs.envOverrides) {
     return cannot("envOverrides sets COMPOSE_FILE, and wtc would replace it");

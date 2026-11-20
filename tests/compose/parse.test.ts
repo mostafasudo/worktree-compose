@@ -188,4 +188,38 @@ describe("parseComposeFile reads compose's YAML the way compose does", () => {
     expect(byName.c.networkMode).toBe(true);
     expect(byName.d.networks).toBeUndefined();
   });
+
+  it("clears ports set with !reset, whatever the payload", () => {
+    const [web] = parseComposeFile(write("compose.yaml", 'services:\n  web:\n    image: nginx\n    ports: !reset ["8080:80"]\n')).services;
+    expect(web.ports).toEqual([]);
+    expect(web.portEntries).toEqual([]);
+  });
+
+  it("records what extends names and the containers a service joins by name", () => {
+    const file = write(
+      "compose.yaml",
+      [
+        "services:",
+        "  base:",
+        "    image: x",
+        "  a:",
+        "    extends: base",
+        "  b:",
+        "    extends:",
+        "      file: common.yaml",
+        "      service: web",
+        "  vpn:",
+        "    image: x",
+        "    network_mode: container:mydb",
+        "    volumes_from:",
+        "      - container:data:ro",
+        "      - base",
+        "",
+      ].join("\n"),
+    );
+    const byName = Object.fromEntries(parseComposeFile(file).services.map((s) => [s.name, s]));
+    expect(byName.a.extendsFrom).toEqual({ service: "base" });
+    expect(byName.b.extendsFrom).toEqual({ service: "web", file: "common.yaml" });
+    expect(byName.vpn.containerRefs).toEqual(["mydb", "data"]);
+  });
 });

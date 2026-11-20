@@ -114,6 +114,12 @@ describe("hardcoded port ranges and suggested variable names", () => {
     ]);
   });
 
+  it("needs a whole number for a hardcoded host port: an interpolated range end is not port 8000", () => {
+    expect(extractPortMappings([svc("web", ["8000-${PORT_END:-8010}:80"])])).toEqual([]);
+    const [rtp] = extractPortMappings([svc("rtp", ["10000-10100:10000-10100"])]);
+    expect(rtp).toMatchObject({ defaultPort: 10000, rangeEnd: 10100, range: true });
+  });
+
   it("ignores host port 0 (the engine picks any free port, so it never collides)", () => {
     expect(extractPortMappings([svc("web", ["0:80", "8080:80"])]).map((m) => m.raw)).toEqual(["8080:80"]);
   });

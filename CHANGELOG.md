@@ -10,7 +10,7 @@ Hardcoded host ports and `container_name` no longer have to be edited out of the
 
 ### Added
 
-- Runtime remapping of hardcoded host ports (`"8080:80"`) and fixed `container_name`s. Each worktree stack gets a generated compose override in `.git/wtc/compose/<project>.yaml` (`ports: !override` with the worktree's ports, `container_name: !reset null` with the old name kept as a network alias inside the stack), passed through `COMPOSE_FILE` to every compose call on the stack and written into the worktree's root env file, so a plain `docker compose` run from the worktree's root uses it too. The compose file is never edited. Needs Docker Compose 2.24.4 or newer: `wtc` checks the engine (`compose config` on a throwaway file) and otherwise warns as before. Left alone: what the worktree's own `compose.override.yaml` sets for a service, the ports of services that use `extends` or come from an `include:`d file with port variables, host port ranges, ports too high to move, and everything when you set `COMPOSE_FILE` yourself.
+- Runtime remapping of hardcoded host ports (`"8080:80"`) and fixed `container_name`s. Each worktree stack gets a generated compose override in `.git/wtc/compose/<project>.yaml` (`ports: !override` with the worktree's ports, `container_name: !reset null` with the old name kept as a network alias inside the stack), passed through `COMPOSE_FILE` to every compose call on the stack and written into the worktree's root env file, so a plain `docker compose` run from the worktree's root uses it too. The compose file is never edited. Needs Docker Compose 2.24.4 or newer: `wtc` checks the engine (`compose config` on a throwaway file) and otherwise warns as before. Left alone: what the worktree's own `compose.override.yaml` sets for a service, the ports of services that use `extends` or come from an `include:`d file with port variables, host port ranges, ports too high to move or whose new port the stack already publishes, a `container_name` another service joins by name (`network_mode: container:<name>`), and everything when you set `COMPOSE_FILE` (or a different `COMPOSE_PATH_SEPARATOR`) yourself.
 - Remapped ports show up in `wtc start`, `wtc list` (and `--json`, MCP `wtc_list`) as `<service>:<default port>`, e.g. `web:8080=28081`; they count in cross-worktree collision checks and `portStride` recommendations, and `wtc doctor` checks whether they are already taken. `wtc doctor` lists what is remapped, or why it can't be.
 
 ### Changed
@@ -22,7 +22,8 @@ Hardcoded host ports and `container_name` no longer have to be edited out of the
 ### Fixed
 
 - A `${VAR:-port}` mapping repeated with the same default (e.g. for tcp and udp) gets one port instead of failing with "Port collision".
-- Compose files are read the way compose reads them: YAML merge keys (`<<: *anchor`) are resolved, and `!override` / `!reset` in a later file of an `include:` path list replace the earlier file's `ports` or `container_name` instead of adding to them.
+- Compose files are read the way compose reads them: YAML merge keys (`<<: *anchor`) are resolved, `ports: !reset` clears the list, and `!override` / `!reset` in a later file of an `include:` path list replace the earlier file's `ports` or `container_name` instead of adding to them.
+- A host port written as an incomplete range (`"8000-${PORT_END:-8010}:80"`) is no longer read as port 8000.
 
 ## [1.0.0] - 2026-10-24
 
