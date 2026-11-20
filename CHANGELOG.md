@@ -4,6 +4,26 @@ All notable changes to worktree-compose (`wtc`) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Hardcoded host ports and `container_name` no longer have to be edited out of the compose file: `wtc` remaps them for each worktree stack at runtime. Thanks to [@cokeeffe](https://github.com/cokeeffe) for the idea ([#12](https://github.com/mostafasudo/worktree-compose/issues/12)).
+
+### Added
+
+- Runtime remapping of hardcoded host ports (`"8080:80"`) and fixed `container_name`s. Each worktree stack gets a generated compose override in `.git/wtc/compose/<project>.yaml` (`ports: !override` with the worktree's ports, `container_name: !reset null` with the old name kept as a network alias inside the stack), passed through `COMPOSE_FILE` to every compose call on the stack and written into the worktree's root env file, so a plain `docker compose` run from the worktree's root uses it too. The compose file is never edited. Needs Docker Compose 2.24.4 or newer: `wtc` checks the engine (`compose config` on a throwaway file) and otherwise warns as before. Left alone: what the worktree's own `compose.override.yaml` sets for a service, the ports of services that use `extends` or come from an `include:`d file with port variables, host port ranges, ports too high to move, and everything when you set `COMPOSE_FILE` yourself.
+- Remapped ports show up in `wtc start`, `wtc list` (and `--json`, MCP `wtc_list`) as `<service>:<default port>`, e.g. `web:8080=28081`; they count in cross-worktree collision checks and `portStride` recommendations, and `wtc doctor` checks whether they are already taken. `wtc doctor` lists what is remapped, or why it can't be.
+
+### Changed
+
+- With an engine that can't remap, `wtc start` and `wtc doctor` add a warning that says why (e.g. Compose older than 2.24.4), which `wtc list` counts among the isolation warnings.
+- Raw port warnings suggest a different variable for each port of a service (`WEB_PORT`, `WEB_443_PORT`) instead of the same one, and host port ranges get a warning of their own (they are never remapped). Host port `0` (any free port) is no longer warned about.
+- `wtc start` prints a worktree's ports after syncing its files, since the worktree's own compose override may be one of them.
+
+### Fixed
+
+- A `${VAR:-port}` mapping repeated with the same default (e.g. for tcp and udp) gets one port instead of failing with "Port collision".
+- Compose files are read the way compose reads them: YAML merge keys (`<<: *anchor`) are resolved, and `!override` / `!reset` in a later file of an `include:` path list replace the earlier file's `ports` or `container_name` instead of adding to them.
+
 ## [1.0.0] - 2026-10-24
 
 The first stable release: worktree stacks keep a stable identity, cleanup no longer touches what it doesn't own, every command runs without a shell, and Podman is supported.

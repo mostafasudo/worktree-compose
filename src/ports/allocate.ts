@@ -23,19 +23,70 @@ export function allocatePort(
   return port;
 }
 
+/**
+ * The mappings that get a host port of their own: each `${VAR:-port}`
+ * mapping (an exact repeat, e.g. the same variable for tcp and udp, only
+ * once), then each hardcoded mapping in `remapped` (remapped at runtime,
+ * see compose/override.ts) whose default port is not already covered — the
+ * allocated port depends only on the default port, so `53:53/tcp` and
+ * `53:53/udp` share one.
+ */
+export function allocatableMappings(
+  mappings: PortMapping[],
+  remapped: PortMapping[] = [],
+): PortMapping[] {
+  const out: PortMapping[] = [];
+  const declared = new Set<string>();
+  const defaults = new Set<number>();
+  for (const m of mappings) {
+    const key = `${m.envVar}\0${m.defaultPort}`;
+    if (m.envVar === null || declared.has(key)) continue;
+    declared.add(key);
+    defaults.add(m.defaultPort);
+    out.push(m);
+  }
+  for (const m of remapped) {
+    if (m.envVar !== null || m.range || defaults.has(m.defaultPort)) continue;
+    defaults.add(m.defaultPort);
+    out.push(m);
+  }
+  return out;
+}
+
+/** `allocatePort`, or null for a hardcoded mapping whose port has nowhere to move (it stays as it is). */
+function allocateOrKeep(m: PortMapping, worktreeIndex: number, portStride: number): number | null {
+  if (m.envVar !== null) return allocatePort(m.defaultPort, worktreeIndex, portStride);
+  try {
+    return allocatePort(m.defaultPort, worktreeIndex, portStride);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ports for one worktree: every `${VAR:-port}` mapping, plus the hardcoded
+ * mappings in `remapped` (envVar null). A hardcoded port that cannot be
+ * moved within range (e.g. 65500) gets no allocation and stays as it is;
+ * a variable's port that cannot throws, as before.
+ */
 export function allocateWorktreePorts(
   mappings: PortMapping[],
   worktreeIndex: number,
   portStride: number = 1,
+  remapped: PortMapping[] = [],
 ): PortAllocation[] {
-  const overridable = mappings.filter((m) => m.envVar !== null);
-
-  const allocations: PortAllocation[] = overridable.map((m) => ({
-    serviceName: m.serviceName,
-    envVar: m.envVar!,
-    port: allocatePort(m.defaultPort, worktreeIndex, portStride),
-    containerPort: m.containerPort,
-  }));
+  const allocations: PortAllocation[] = allocatableMappings(mappings, remapped).flatMap((m) => {
+    const port = allocateOrKeep(m, worktreeIndex, portStride);
+    return port === null
+      ? []
+      : [{
+          serviceName: m.serviceName,
+          envVar: m.envVar,
+          port,
+          containerPort: m.containerPort,
+          defaultPort: m.defaultPort,
+        }];
+  });
 
   const seen = new Set<number>();
   for (const a of allocations) {
@@ -62,8 +113,22 @@ export function allocationEnv(
   allocations: PortAllocation[],
 ): Record<string, string> {
   return Object.fromEntries(
-    allocations.map((a) => [a.envVar, String(a.port)]),
+    allocations.flatMap((a) => (a.envVar === null ? [] : [[a.envVar, String(a.port)]])),
   );
+}
+
+/**
+ * How a port is named in output (`wtc list`, `ports` in JSON and MCP): its
+ * variable, or `<service>:<default port>` for a hardcoded port remapped at
+ * runtime — no variable holds that one.
+ */
+export function portLabel(a: PortAllocation): string {
+  return a.envVar ?? `${a.serviceName}:${a.defaultPort}`;
+}
+
+/** `{ label: port }` for output. */
+export function portsByLabel(allocations: PortAllocation[]): Record<string, number> {
+  return Object.fromEntries(allocations.map((a) => [portLabel(a), a.port]));
 }
 
 export interface PortCollisionParty {
@@ -87,8 +152,9 @@ export function detectCrossWorktreeCollisions(
   mappings: PortMapping[],
   portStride: number,
   worktrees: number | number[],
+  remapped: PortMapping[] = [],
 ): PortCollision[] {
-  const overridable = mappings.filter((m) => m.envVar !== null);
+  const overridable = allocatableMappings(mappings, remapped);
   const seen = new Map<number, PortCollisionParty>();
   const collisions: PortCollision[] = [];
   const indices = Array.isArray(worktrees)
@@ -97,7 +163,8 @@ export function detectCrossWorktreeCollisions(
 
   for (const w of indices) {
     for (const m of overridable) {
-      const port = allocatePort(m.defaultPort, w, portStride);
+      const port = allocateOrKeep(m, w, portStride);
+      if (port === null) continue;
       const prev = seen.get(port);
       if (prev) {
         collisions.push({
@@ -125,11 +192,12 @@ const STRIDE_SEARCH_CAP = 4096;
 export function recommendPortStride(
   mappings: PortMapping[],
   worktreeCount: number,
+  remapped: PortMapping[] = [],
 ): number {
   const horizon = Math.max(worktreeCount, 100);
   for (let s = 1; s <= STRIDE_SEARCH_CAP; s++) {
     try {
-      if (detectCrossWorktreeCollisions(mappings, s, horizon).length === 0) {
+      if (detectCrossWorktreeCollisions(mappings, s, horizon, remapped).length === 0) {
         return s;
       }
     } catch {

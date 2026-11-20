@@ -1,21 +1,41 @@
 import fs from "node:fs";
 import path from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parseDocument } from "yaml";
 import type { ComposeFile, ComposeService, SharedResource } from "./types.js";
+
+/** The `host:container` string wtc reads a `ports:` entry as, or null (no published port). */
+export function portEntryString(p: unknown): string | null {
+  if (typeof p === "string") return p;
+  if (typeof p === "number") return String(p);
+  if (typeof p === "object" && p !== null) {
+    const obj = p as Record<string, unknown>;
+    if (obj.published != null && obj.target != null) {
+      return `${obj.published}:${obj.target}`;
+    }
+  }
+  return null;
+}
 
 function parseServicePorts(ports: unknown): string[] {
   if (!Array.isArray(ports)) return [];
-
   return ports.flatMap((p) => {
-    if (typeof p === "string") return [p];
-    if (typeof p === "number") return [String(p)];
-    if (typeof p === "object" && p !== null) {
-      const obj = p as Record<string, unknown>;
-      if (obj.published != null && obj.target != null) {
-        return [`${obj.published}:${obj.target}`];
-      }
-    }
-    return [];
+    const s = portEntryString(p);
+    return s === null ? [] : [s];
+  });
+}
+
+/** Key for deduplicating `ports:` entries across files (same written value). */
+function entryKey(entry: unknown): string {
+  return JSON.stringify(entry) ?? String(entry);
+}
+
+function uniqueEntries(entries: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  return entries.filter((e) => {
+    const key = entryKey(e);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -45,9 +65,20 @@ function parseEnvFile(envFile: unknown): string[] | undefined {
   return undefined;
 }
 
+/** Network names a service joins: the keys of the map form, or the list form. */
+function parseServiceNetworks(networks: unknown): string[] | undefined {
+  if (Array.isArray(networks)) return networks.filter((n): n is string => typeof n === "string");
+  if (networks && typeof networks === "object") return Object.keys(networks);
+  return undefined;
+}
+
+/** Compose's `!reset` / `!override` tag on a service key, when there is one. */
+type KeyTag = (service: string, key: string) => string | undefined;
+
 function parseServicesObject(
   doc: Record<string, unknown>,
   sourcePath: string,
+  tagOf: KeyTag = () => undefined,
 ): ComposeService[] {
   if (!("services" in doc) || !doc.services || typeof doc.services !== "object") {
     return [];
@@ -60,12 +91,21 @@ function parseServicesObject(
   return Object.entries(servicesObj).map(([name, svc]) => {
     // An empty service definition (`foo:` with no body) parses to null.
     const s = svc ?? {};
+    const portsTag = tagOf(name, "ports");
+    const nameReset = tagOf(name, "container_name") === "!reset";
+    const networks = parseServiceNetworks(s.networks);
     return {
       name,
       ports: parseServicePorts(s.ports),
+      portEntries: Array.isArray(s.ports) ? uniqueEntries(s.ports) : [],
+      ...(portsTag === "!override" || portsTag === "!reset" ? { portsReplace: true } : {}),
+      ...(s.extends != null ? { extends: true } : {}),
+      ...(networks ? { networks } : {}),
+      ...(s.network_mode != null ? { networkMode: true } : {}),
       build: parseServiceBuild(s.build),
       envFile: parseEnvFile(s.env_file),
-      ...(typeof s.container_name === "string" && s.container_name
+      ...(nameReset ? { containerNameReset: true } : {}),
+      ...(!nameReset && typeof s.container_name === "string" && s.container_name
         ? { containerName: s.container_name }
         : {}),
       sourcePath,
@@ -192,9 +232,12 @@ function mergeService(
   base: ComposeService,
   override: ComposeService,
 ): ComposeService {
-  const ports = [...base.ports];
-  for (const p of override.ports) {
-    if (!ports.includes(p)) ports.push(p);
+  // `ports: !override` / `!reset` in the later file replaces the list.
+  const ports = override.portsReplace ? [...override.ports] : [...base.ports];
+  if (!override.portsReplace) {
+    for (const p of override.ports) {
+      if (!ports.includes(p)) ports.push(p);
+    }
   }
   const sourcePath =
     override.build !== undefined
@@ -202,14 +245,24 @@ function mergeService(
       : base.build !== undefined
         ? base.sourcePath
         : override.sourcePath;
+  const containerName = override.containerNameReset
+    ? override.containerName
+    : (override.containerName ?? base.containerName);
+  const networks = [...new Set([...(base.networks ?? []), ...(override.networks ?? [])])];
   return {
     name: override.name,
     ports,
+    portEntries: override.portsReplace
+      ? (override.portEntries ?? [])
+      : uniqueEntries([...(base.portEntries ?? []), ...(override.portEntries ?? [])]),
+    ...(base.portsReplace || override.portsReplace ? { portsReplace: true } : {}),
+    ...(base.extends || override.extends ? { extends: true } : {}),
+    ...(base.networks || override.networks ? { networks } : {}),
+    ...(base.networkMode || override.networkMode ? { networkMode: true } : {}),
     build: override.build ?? base.build,
     envFile: override.envFile ?? base.envFile,
-    ...((override.containerName ?? base.containerName)
-      ? { containerName: override.containerName ?? base.containerName }
-      : {}),
+    ...(containerName ? { containerName } : {}),
+    ...(override.containerNameReset ? { containerNameReset: true } : {}),
     sourcePath,
   };
 }
@@ -242,15 +295,16 @@ function parseRecursive(filePath: string, st: ParseState): ComposeService[] {
   st.seen.add(key);
 
   const raw = fs.readFileSync(filePath, "utf-8");
-  let doc: unknown;
-  try {
-    doc = parseYaml(raw, { uniqueKeys: false });
-  } catch (err) {
-    throw new Error(
-      `Invalid YAML in ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  // Merge keys (`<<: *anchor`) resolved as compose resolves them; compose's
+  // own tags (`!reset`, `!override`) kept on the nodes, without warnings.
+  const document = parseDocument(raw, { uniqueKeys: false, merge: true });
+  if (document.errors.length > 0) {
+    throw new Error(`Invalid YAML in ${filePath}: ${document.errors[0].message}`);
   }
+  const doc: unknown = document.toJS();
   if (!doc || typeof doc !== "object") return [];
+  const tagOf: KeyTag = (service, k) =>
+    (document.getIn(["services", service, k], true) as { tag?: string } | undefined)?.tag;
 
   st.sourceFiles.push(key);
 
@@ -269,7 +323,7 @@ function parseRecursive(filePath: string, st: ParseState): ComposeService[] {
   mergeResources(st.volumes, parseResources(record.volumes));
   mergeResources(st.networks, parseResources(record.networks));
 
-  const local = parseServicesObject(record, key);
+  const local = parseServicesObject(record, key, tagOf);
   return foldServices([...included, ...local]);
 }
 

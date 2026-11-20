@@ -4,8 +4,8 @@ import path from "node:path";
 import { ENGINE_PROBE_TIMEOUT_MS, run, runSafe } from "../utils/exec.js";
 import { isWithin } from "../utils/paths.js";
 import { sanitize, worktreeResourcePattern } from "../utils/sanitize.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
 import { cliCall, isComposePlugin } from "../compose/engine.js";
+import { COMPOSE_FILE_VAR } from "../sync/env.js";
 import {
   field,
   labelsOf,
@@ -16,7 +16,8 @@ import {
 import { samePath } from "../git/worktree.js";
 import { listRepoWorktrees } from "../git/repo.js";
 import { recordIsLive } from "../state/registry.js";
-import { composeEnv, composeRun } from "./compose.js";
+import { composeEnv, composeRun, prepareStack } from "./compose.js";
+import type { ComposeCallEnv } from "./compose.js";
 import type { ComposeEngine } from "../compose/engine.js";
 import type { Reporter } from "../utils/log.js";
 import type { WtcContext } from "../context.js";
@@ -79,7 +80,9 @@ export function anonymousVolumes(engine: ComposeEngine, project: string): string
 /**
  * `compose -p P down -v --remove-orphans`. Runs from the worktree when it
  * still exists (so declared volumes/networks are resolved from its compose
- * file), otherwise from the main checkout. Fallbacks, in order:
+ * file), otherwise from the main checkout — with the compose files the
+ * stack was started with (its runtime override, which is deleted when its
+ * record is forgotten). Fallbacks, in order:
  * - plain `down -v` from the same directory (podman-compose < 1.0.6 rejects
  *   `--remove-orphans`, which would make every teardown fail);
  * - for the Compose v2 plugin only, `down -v --remove-orphans` from an
@@ -94,27 +97,29 @@ export async function teardownStack(
   target: TeardownTarget,
   io: CoreIo,
 ): Promise<{ ok: boolean; error?: string }> {
-  let env: Record<string, string> | undefined;
+  const cwd = fs.existsSync(target.path) ? target.path : ctx.repoRoot;
+  let env: ComposeCallEnv | undefined;
   try {
-    env = composeEnv(
-      target.project,
-      allocateWorktreePorts(ctx.portMappings, target.index, ctx.portStride),
-    );
+    // The compose files the stack was started with (runtime override included).
+    const stack = prepareStack(ctx, { project: target.project, index: target.index, dir: cwd }, { write: false });
+    env = composeEnv(target.project, stack.allocations, stack.composeFile, ctx.repo.commonDir);
   } catch {
     env = undefined;
   }
-  const cwd = fs.existsSync(target.path) ? target.path : ctx.repoRoot;
+  // The label-only retry must not load any compose file, wtc's or an inherited list.
+  const labelsOnlyEnv: ComposeCallEnv = { ...env, [COMPOSE_FILE_VAR]: undefined };
   const anonymous = anonymousVolumes(engine, target.project);
-  const call = { env, live: io.live, signal: io.signal, onLine: io.onOutput };
+  const call = { live: io.live, signal: io.signal, onLine: io.onOutput };
 
-  const attempts: { args: string[]; dir: () => string }[] = [
-    { args: ["down", "-v", "--remove-orphans"], dir: () => cwd },
-    { args: ["down", "-v"], dir: () => cwd },
+  const attempts: { args: string[]; dir: () => string; env: ComposeCallEnv | undefined }[] = [
+    { args: ["down", "-v", "--remove-orphans"], dir: () => cwd, env },
+    { args: ["down", "-v"], dir: () => cwd, env },
   ];
   if (isComposePlugin(engine)) {
     attempts.push({
       args: ["down", "-v", "--remove-orphans"],
       dir: () => fs.mkdtempSync(path.join(os.tmpdir(), "wtc-down-")),
+      env: labelsOnlyEnv,
     });
   }
 
@@ -123,7 +128,7 @@ export async function teardownStack(
     if (io.signal?.aborted) break;
     const dir = attempt.dir();
     try {
-      await composeRun(engine, target.project, attempt.args, { ...call, cwd: dir });
+      await composeRun(engine, target.project, attempt.args, { ...call, env: attempt.env, cwd: dir });
       for (const volume of anonymous) {
         const [file, args] = cliCall(engine, "volume", "rm", volume);
         runSafe(file, args, { timeoutMs: ENGINE_PROBE_TIMEOUT_MS });

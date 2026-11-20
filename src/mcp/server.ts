@@ -158,7 +158,7 @@ export function createMcpServer(): McpServer {
     {
       title: "Start worktree stacks",
       description:
-        "Start Docker Compose stacks for worktrees. Syncs compose/infra files from the main checkout, injects isolated ports and COMPOSE_PROJECT_NAME into env files, runs compose up -d. Sends progress notifications when the request carries a progressToken; cancelling the request stops compose.",
+        "Start Docker Compose stacks for worktrees. Syncs compose/infra files from the main checkout, injects isolated ports and COMPOSE_PROJECT_NAME into env files, remaps hardcoded host ports and container_name through a generated compose override (the compose file is never edited), runs compose up -d. Sends progress notifications when the request carries a progressToken; cancelling the request stops compose.",
       inputSchema: {
         indices: worktreesSchema,
         envFile: envFileSchema,

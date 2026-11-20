@@ -51,7 +51,7 @@ wtc list
 - [Selecting worktrees](#selecting-worktrees)
 - [Preparing your compose file](#preparing-your-compose-file)
 - [Monorepos & custom env files](#monorepos--custom-env-files)
-- [How It Works](#how-it-works) — [stable identity](#stable-worktree-identity), [ports](#port-allocation), [project names](#container-isolation-and-compose_project_name), [file sync](#file-sync), [env files](#env-files)
+- [How It Works](#how-it-works) — [stable identity](#stable-worktree-identity), [ports](#port-allocation), [project names](#container-isolation-and-compose_project_name), [runtime remapping](#runtime-remapping), [file sync](#file-sync), [env files](#env-files)
 - [Commands](#commands) — [what each one does to your data](#what-each-command-does-to-your-data)
 - [Configuration (Optional)](#configuration-optional)
 - [Docker, Podman, OrbStack, Colima](#docker-podman-orbstack-colima)
@@ -70,7 +70,7 @@ Spin up multiple developers or AI agents on the same repo — each in its own [g
 
 `wtc` reads your existing compose file and turns every worktree into a fully isolated, side-by-side environment — unique host ports, separate containers, networks, and volumes — with **zero configuration**.
 
-- ⚡ **Zero config** — reads your existing `docker-compose.yml` / `compose.yaml`, no new files required
+- ⚡ **Zero config** — reads your existing `docker-compose.yml` / `compose.yaml` as it is: hardcoded host ports and `container_name` are remapped at runtime, never edited
 - 🔌 **Automatic ports** — unique, collision-free host ports per worktree
 - 📦 **Full isolation** — separate containers, networks, and volumes for each stack
 - 📌 **Stable identity** — a worktree keeps its index, ports, and project name; removing one never renumbers the others
@@ -108,7 +108,7 @@ wtc clean
 
 ## How is this different from `docker compose -p`?
 
-`docker compose -p` only namespaces the project. You'd still hand-pick free host ports, hand-edit each worktree's `.env`, copy infra files in, remember which project belongs to which worktree, and tear everything down yourself. `wtc` builds on that same project-name isolation and automates the rest: collision-free **port allocation**, a **stable index and project name** per worktree, per-worktree **env file injection** (including `COMPOSE_PROJECT_NAME`, so plain `docker compose` in the worktree hits the right stack), infra-file **sync**, one-command **`promote`**, safe **cleanup**, and a built-in **MCP server** so AI agents can drive it all themselves.
+`docker compose -p` only namespaces the project. You'd still hand-pick free host ports, hand-edit each worktree's `.env`, copy infra files in, remember which project belongs to which worktree, and tear everything down yourself. `wtc` builds on that same project-name isolation and automates the rest: collision-free **port allocation** (hardcoded host ports included), a **stable index and project name** per worktree, per-worktree **env file injection** (including `COMPOSE_PROJECT_NAME`, so plain `docker compose` in the worktree hits the right stack), infra-file **sync**, one-command **`promote`**, safe **cleanup**, and a built-in **MCP server** so AI agents can drive it all themselves.
 
 ## Quick Start
 
@@ -176,19 +176,25 @@ wtc mcp                       # MCP server for AI agents (stdio)
 
 `wtc` looks for `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` (in that order) at the root of the main checkout.
 
-For `wtc` to isolate a service's port, the host port must use the `${VAR:-default}` pattern, with an upper-case variable name:
+You don't have to change it. Each worktree gets its own host ports either way:
 
 ```yaml
-# wtc CAN isolate this
+# A variable (upper-case name): wtc sets it per worktree and writes it to the worktree's env file
 ports:
   - "${BACKEND_PORT:-8000}:8000"
 
-# wtc CANNOT isolate this (hardcoded)
+# Hardcoded: wtc remaps it per worktree at runtime; the file stays as it is
 ports:
   - "8080:8080"
 ```
 
-If `wtc` finds hardcoded ports, it warns you and suggests the fix:
+Hardcoded host ports (and a fixed `container_name`) are [remapped at runtime](#runtime-remapping) through a compose override `wtc` generates, which needs Docker Compose 2.24.4 or newer. `wtc start` says what it remapped:
+
+```
+ℹ Remapping hardcoded host ports per worktree at runtime (your compose file is unchanged): nginx 8080:80. To use one in env values, give it a variable, e.g. "${NGINX_PORT:-8080}:80".
+```
+
+Use a variable when something else needs the port's per-worktree value: the variable is written to the worktree's env file and can be used in [`envOverrides`](#envoverrides) (a `DATABASE_URL`, an API URL), while a remapped port is only published. With an engine that can't remap, `wtc` warns about hardcoded ports instead, and they stay the same in every worktree:
 
 ```
 ⚠ Service "nginx" uses a raw port mapping (8080:80). To enable port isolation, change it to: "${NGINX_PORT:-8080}:80"
@@ -223,9 +229,9 @@ If `wtc` finds hardcoded ports, it warns you and suggests the fix:
 
 `wtc start` and `wtc doctor` warn about compose settings that make worktree stacks collide or share data (`wtc list` only prints how many there are):
 
-- **`container_name: db`** — every stack would use the same container name, so the second one fails to start. Remove it, or make it per-stack: `container_name: ${COMPOSE_PROJECT_NAME:-myapp}-db`.
+- **Hardcoded host ports and `container_name: db`** — every stack would publish the same ports and use the same container name, so the second one fails to start. `wtc` [remaps both at runtime](#runtime-remapping) and only warns when it can't; then write the port as `"${DB_PORT:-5432}:5432"`, and remove `container_name` or make it per-stack: `container_name: ${COMPOSE_PROJECT_NAME:-myapp}-db`.
+- **Host port ranges** (`"8000-8010:8000-8010"`) — not remapped: every stack binds the same ports.
 - **Top-level volumes or networks with a fixed `name:` or `external: true`** — every stack shares them. A `name:` that contains `${COMPOSE_PROJECT_NAME}` is per-stack and fine.
-- **Hardcoded host ports** — see above.
 - **Cross-worktree port collisions** — see [`portStride`](#clustered-default-ports-and-portstride).
 
 ### Included compose files
@@ -341,11 +347,44 @@ A stride of `100` gives every worktree a 100-port band, which is collision-free 
 
 Each worktree's stack runs as the compose project `{repo}-wt-{index}-{branch}`, lowercased with anything other than `a-z`, `0-9`, and `-` turned into `-` — for example `myapp-wt-1-feature-auth`. Compose names containers, networks, and volumes after the project, so nothing is shared. `{repo}` is the main checkout's directory name (for a bare repository, the repository's own name), so it is the same from every worktree.
 
-`wtc` passes `-p <project>` on every compose call, exports `COMPOSE_PROJECT_NAME` and the allocated ports into compose's environment, and writes `COMPOSE_PROJECT_NAME=<project>` into the worktree's root env file. With the default `.env`, a plain `docker compose ps` / `logs` / `exec` (or a Makefile) run inside the worktree therefore reaches the same stack on the same ports.
+`wtc` passes `-p <project>` on every compose call, exports `COMPOSE_PROJECT_NAME` and the allocated ports into compose's environment, and writes `COMPOSE_PROJECT_NAME=<project>` into the worktree's root env file (plus `COMPOSE_FILE` when it [remaps hardcoded settings](#runtime-remapping)). With the default `.env`, a plain `docker compose ps` / `logs` / `exec` (or a Makefile) run inside the worktree therefore reaches the same stack on the same ports.
 
 Compose only reads a file named `.env` on its own. With a custom `envFile` such as `.env.development`, pass it explicitly (`docker compose --env-file .env.development ps`) or pass `-p <project>` (the `project` field of `wtc list --json`).
 
 `${COMPOSE_PROJECT_NAME}` is also available in `envOverrides` and `workspaceEnvOverrides` values, e.g. `"QUEUE_PREFIX": "${COMPOSE_PROJECT_NAME}-jobs"`.
+
+### Runtime remapping
+
+A hardcoded host port (`"8080:80"`) or a fixed `container_name` would make every worktree stack collide. Instead of asking you to edit the compose file, `wtc` writes a compose override for each worktree stack:
+
+```yaml
+# .git/wtc/compose/myapp-wt-1-feature-auth.yaml (generated, rewritten on every start)
+services:
+  web:
+    ports: !override
+      - "28081:80"
+    container_name: !reset null
+    networks:
+      default:
+        aliases:
+          - "web"
+```
+
+- `ports: !override` replaces the service's port list: every entry as written, with only the hardcoded host ports swapped for the worktree's (same IP, protocol, and long-form fields). A plain override can't do this, because compose merges port lists and would still publish `8080`.
+- `container_name: !reset null` drops the fixed name, so compose names the containers after the project (`myapp-wt-1-feature-auth-web-1`). The old name stays a network alias on the stack's own networks, so containers that reach the service by it (`DB_HOST=mydb`) still do, and reach this stack's copy. Not on a network every stack shares (fixed `name:` or `external`), where the alias would answer for all of them, nor with `network_mode`.
+- Every compose call on the stack (`start`, `stop`, teardown) runs with `COMPOSE_FILE` listing the compose file, the worktree's own `compose.override.yaml` if it has one, and this file. `wtc` also writes that `COMPOSE_FILE` into the worktree's root env file, so a plain `docker compose up` run from the worktree's root uses the same ports. (From a subdirectory, compose finds the compose file itself and ignores `COMPOSE_FILE` in `.env`.)
+- The file lives in `.git/wtc/compose/`, never in your working tree. `start` rewrites it after syncing the compose file; `stop` and teardown use it as the stack was started. It is deleted when `wtc prune` or `wtc clean` forgets the worktree; a worktree that `clean` keeps also keeps its override, since its env file still lists it.
+- `wtc list` shows a remapped port as `<service>:<default port>`, e.g. `web:8080=28081`. It has no variable, so nothing is written to env files for it and `envOverrides` can't refer to it; give it a variable in the compose file when an env value needs it.
+
+`!override` and `!reset` need Docker Compose 2.24.4 or newer. `wtc` checks once per run that the engine applies them (`compose config` on a throwaway file; no containers, no daemon) and otherwise remaps nothing and warns as before. It also leaves alone:
+
+- what the worktree's own `compose.override.yaml` (or `docker-compose.override.yml`, …) sets for a service: its `ports` (or `extends`) or `container_name` would be discarded;
+- the ports of a service that uses `extends`, which may inherit ports `wtc` can't see;
+- the ports of a service from an `include:`d file whose ports use variables: compose fills those in from that file's own `.env`, while an override is filled in from the main project's;
+- host port ranges, and a hardcoded port too high to move (it stays as it is, with a warning);
+- everything, when you set `COMPOSE_FILE` yourself: in your environment, the root env file, the main checkout's `.env`, `envOverrides`, or a worktree's own `.env`. A `COMPOSE_FILE` that names `wtc`'s own override (a worktree's `.env` exported by direnv, say) doesn't count.
+
+`wtc doctor` lists what is remapped, or why it can't be.
 
 ### File Sync
 
@@ -362,7 +401,7 @@ Sync copies over what is at those paths and removes nothing else: files that onl
 On every `start` and `restart`, for the root and each selected workspace:
 
 1. **Copy fresh from main:** `<envFile>` (default `.env`), falling back to `.env.example`. The root gets an empty file if neither exists; a workspace with neither is skipped.
-2. **Inject:** `COMPOSE_PROJECT_NAME` (root only), every allocated port variable, then `envOverrides` (root) or `workspaceEnvOverrides` (that workspace). **A key that already exists is rewritten in place** — comments, ordering, and all other lines are preserved. Keys that don't exist are appended in a marked block, which is replaced on every run and never accumulates.
+2. **Inject:** `COMPOSE_PROJECT_NAME` (root only; with [runtime remapping](#runtime-remapping) also `COMPOSE_FILE`), every allocated port variable, then `envOverrides` (root) or `workspaceEnvOverrides` (that workspace). **A key that already exists is rewritten in place** — comments, ordering, and all other lines are preserved. Keys that don't exist are appended in a marked block, which is replaced on every run and never accumulates.
 
 With `"envOverrides": { "DATABASE_URL": "postgresql://app:app@localhost:${POSTGRES_PORT}/app" }` and a main `.env` of
 
@@ -496,7 +535,7 @@ Tears down (`compose down -v --remove-orphans`, deleting volumes) and forgets **
 wtc doctor [--json]
 ```
 
-A ✔ / ⚠ / ✖ checklist with hints: git version; repository and main-checkout detection; compose file found and parsed (services, included files); config parsed (`.wtcrc.json` or `package.json#wtc`); compose engine and version (when it doesn't work, whether `WTC_COMPOSE_COMMAND`, `composeCommand`, or auto-detection chose it); daemon reachable; isolatable vs. hardcoded ports; [isolation warnings](#settings-that-break-isolation); cross-worktree port collisions; missing worktrees; orphaned stacks; each worktree's stack state; and allocated ports already taken by something else for worktrees whose stack isn't running. Read-only. Exits 1 if any check fails.
+A ✔ / ⚠ / ✖ checklist with hints: git version; repository and main-checkout detection; compose file found and parsed (services, included files); config parsed (`.wtcrc.json` or `package.json#wtc`); compose engine and version (when it doesn't work, whether `WTC_COMPOSE_COMMAND`, `composeCommand`, or auto-detection chose it); daemon reachable; isolatable ports, including hardcoded ones [remapped at runtime](#runtime-remapping) (or why they can't be); [isolation warnings](#settings-that-break-isolation); cross-worktree port collisions; missing worktrees; orphaned stacks; each worktree's stack state; and allocated ports already taken by something else for worktrees whose stack isn't running. Read-only. Exits 1 if any check fails.
 
 ### `wtc skill`
 
@@ -706,7 +745,7 @@ wtc clean             # worktrees with uncommitted work are kept; --force discar
 - **Node.js** >= 20
 - **Git** 2.17 or newer, with worktree support (2.31+ recommended)
 - **Docker** with Compose v2 (`docker compose`), or **Podman** (`podman compose` / `podman-compose`) — see [engines](#docker-podman-orbstack-colima)
-- A compose file with `${VAR:-default}` host ports
+- Docker Compose 2.24.4 or newer to [remap hardcoded host ports and `container_name`](#runtime-remapping); with older engines, write host ports as `${VAR:-default}`
 
 ## Troubleshooting
 
@@ -718,7 +757,7 @@ Start with **`wtc doctor`**: it checks the engine, the daemon, ports, isolation 
 
 **"No extra worktrees found"** — Create worktrees first: `git worktree add -b my-branch ../my-feature`
 
-**Ports not changing** — Use `${VAR:-default}` with an upper-case variable for host ports, not hardcoded numbers. `wtc doctor` lists which ports are isolatable.
+**Ports not changing** — `wtc doctor` lists which ports are isolated, and whether hardcoded ones are remapped at runtime or why not (it needs Docker Compose 2.24.4+). Otherwise write host ports as `${VAR:-default}`, with an upper-case variable. A plain `docker compose up` run from a subdirectory of the worktree ignores `COMPOSE_FILE` in `.env` and publishes the hardcoded ports; run it from the worktree's root, or use `wtc restart .`.
 
 **"Bind for 0.0.0.0:25435 failed: port is already allocated"** — Something else listens on that port. `wtc doctor` reports allocated ports that are already taken; stop the other process, or raise `portStride`. If you run `docker compose` yourself with a custom `envFile`, pass `--env-file <envFile>` (Compose only reads `.env` on its own) or export the port (e.g. `POSTGRES_PORT=25435 docker compose up`).
 

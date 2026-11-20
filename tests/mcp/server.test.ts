@@ -114,7 +114,9 @@ describe("MCP tools wired to core operations (fake engine)", () => {
     expect(result.isError).toBe(false);
     const rows = JSON.parse(result.content[0].text) as { branch: string; index: number }[];
     expect(rows).toMatchObject([{ index: 1, branch: "feat-a" }]);
-    expect(result.content.slice(1).map((c) => c.text)).toContain("⚠ 1 isolation warning(s) — run wtc_doctor");
+    // The raw port, and why it is not remapped at runtime (the fake engine
+    // does not apply compose's !override / !reset tags).
+    expect(result.content.slice(1).map((c) => c.text)).toContain("⚠ 2 isolation warning(s) — run wtc_doctor");
   });
 
   it("wtc_list is read-only: no registry, no wtc-id, a corrupt registry left in place", async () => {

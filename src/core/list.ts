@@ -1,5 +1,5 @@
 import { buildContext } from "../context.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
+import { allocatableMappings, allocateWorktreePorts, portsByLabel } from "../ports/allocate.js";
 import { stackStatus } from "../compose/status.js";
 import type { StackStatus } from "../compose/status.js";
 import type { PortAllocation } from "../ports/types.js";
@@ -15,6 +15,10 @@ export interface ListRow {
   running: number | null;
   total: number | null;
   url: string | null;
+  /**
+   * Allocated host ports by variable — or by `<service>:<default port>` for
+   * hardcoded ports remapped at runtime.
+   */
   ports: Record<string, number>;
   /** The worktree was removed but its registry record (and maybe its stack) remains. */
   orphan: boolean;
@@ -28,7 +32,7 @@ export interface ListRow {
 
 export interface ListResult {
   rows: ListRow[];
-  /** Default (main checkout) ports of isolatable services. */
+  /** Default (main checkout) ports of isolated services, remapped hardcoded ones included. */
   mainPorts: { service: string; port: number }[];
   warnings: string[];
   isolationWarnings: string[];
@@ -39,7 +43,7 @@ function safeAllocate(
   index: number,
 ): PortAllocation[] {
   try {
-    return allocateWorktreePorts(ctx.portMappings, index, ctx.portStride);
+    return allocateWorktreePorts(ctx.portMappings, index, ctx.portStride, ctx.remap?.ports);
   } catch {
     return [];
   }
@@ -82,7 +86,7 @@ export function listWorktrees(io: CoreIo): ListResult {
       running: state?.running ?? null,
       total: state?.total ?? null,
       url: pickUrl(allocations),
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
       orphan: false,
       unavailable: null,
     });
@@ -99,7 +103,7 @@ export function listWorktrees(io: CoreIo): ListResult {
       running: state?.running ?? null,
       total: state?.total ?? null,
       url: null,
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
       orphan: false,
       unavailable: u.reason,
     });
@@ -116,7 +120,7 @@ export function listWorktrees(io: CoreIo): ListResult {
       running: state?.running ?? null,
       total: state?.total ?? null,
       url: null,
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
       orphan: true,
       unavailable: null,
     });
@@ -127,9 +131,10 @@ export function listWorktrees(io: CoreIo): ListResult {
 
   return {
     rows,
-    mainPorts: ctx.portMappings
-      .filter((m) => m.envVar !== null)
-      .map((m) => ({ service: m.serviceName, port: m.defaultPort })),
+    mainPorts: allocatableMappings(ctx.portMappings, ctx.remap?.ports).map((m) => ({
+      service: m.serviceName,
+      port: m.defaultPort,
+    })),
     warnings,
     isolationWarnings: ctx.isolationWarnings,
   };

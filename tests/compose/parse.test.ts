@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseComposeFile } from "../../src/compose/parse.js";
@@ -136,5 +138,54 @@ describe("parseComposeFile", () => {
       );
       expect(result.services.map((s) => s.name)).toEqual(["postgres"]);
     });
+  });
+});
+
+describe("parseComposeFile reads compose's YAML the way compose does", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "wtc-parse-")));
+  });
+
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  function write(rel: string, contents: string): string {
+    const full = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, contents);
+    return full;
+  }
+
+  it("resolves YAML merge keys", () => {
+    const file = write(
+      "compose.yaml",
+      'x-web: &web\n  image: nginx\n  container_name: web\n  ports: ["8080:80"]\nservices:\n  web:\n    <<: *web\n',
+    );
+    const [web] = parseComposeFile(file).services;
+    expect(web.ports).toEqual(["8080:80"]);
+    expect(web.containerName).toBe("web");
+  });
+
+  it("lets !override / !reset in a later file of an include list replace the earlier one", () => {
+    write("base.yaml", 'services:\n  web:\n    image: nginx\n    container_name: web\n    ports: ["8080:80", "8443:443"]\n');
+    write("local.yaml", 'services:\n  web:\n    container_name: !reset null\n    ports: !override ["8080:80"]\n');
+    const file = write("compose.yaml", "include:\n  - path: [./base.yaml, ./local.yaml]\nservices: {}\n");
+    const [web] = parseComposeFile(file).services;
+    expect(web.ports).toEqual(["8080:80"]);
+    expect(web.portEntries).toEqual(["8080:80"]);
+    expect(web.containerName).toBeUndefined();
+  });
+
+  it("records the networks a service joins and whether it sets network_mode", () => {
+    const file = write(
+      "compose.yaml",
+      "services:\n  a:\n    image: x\n    networks: [front, back]\n  b:\n    image: x\n    networks:\n      back:\n        aliases: [bee]\n  c:\n    image: x\n    network_mode: host\n  d:\n    image: x\n",
+    );
+    const byName = Object.fromEntries(parseComposeFile(file).services.map((s) => [s.name, s]));
+    expect(byName.a.networks).toEqual(["front", "back"]);
+    expect(byName.b.networks).toEqual(["back"]);
+    expect(byName.c.networkMode).toBe(true);
+    expect(byName.d.networks).toBeUndefined();
   });
 });

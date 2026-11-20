@@ -59,6 +59,12 @@ export interface InjectOptions {
    */
   writeProjectName?: boolean;
   /**
+   * Also write `COMPOSE_FILE=<value>` (root target only, when wtc remaps
+   * hardcoded ports or container names at runtime), so `docker compose`
+   * run by hand inside the worktree loads the same override wtc used.
+   */
+  composeFile?: string;
+  /**
    * Directory the env file must stay inside (the worktree root). Defaults to
    * the file's own directory, which still protects the final component.
    */
@@ -67,10 +73,15 @@ export interface InjectOptions {
   source?: string;
 }
 
+/** Name of the compose file list variable (runtime remapping). */
+export const COMPOSE_FILE_VAR = "COMPOSE_FILE";
+
 /**
- * All keys that should be written for a target: the project name (root
- * target), allocated ports, then the target's overrides (already
- * interpolated). Overrides win on key conflicts.
+ * All keys that should be written for a target: the project name and
+ * compose file list (root target), allocated port variables, then the
+ * target's overrides (already interpolated). Overrides win on key
+ * conflicts. A remapped hardcoded port has no variable, so nothing is
+ * written for it.
  */
 export function buildOverrideEntries(
   allocations: PortAllocation[],
@@ -84,8 +95,10 @@ export function buildOverrideEntries(
     if (opts.writeProjectName) entries[PROJECT_NAME_VAR] = opts.projectName;
     values.set(PROJECT_NAME_VAR, opts.projectName);
   }
+  if (opts.composeFile) entries[COMPOSE_FILE_VAR] = opts.composeFile;
 
   for (const a of allocations) {
+    if (a.envVar === null) continue;
     entries[a.envVar] = String(a.port);
     values.set(a.envVar, a.port);
   }

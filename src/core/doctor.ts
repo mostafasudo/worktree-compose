@@ -6,9 +6,16 @@ import { detectComposeFile } from "../compose/detect.js";
 import { parseComposeFile } from "../compose/parse.js";
 import { daemonCheckArgs, resolveEngine } from "../compose/engine.js";
 import { createStackProbe, stackStatus } from "../compose/status.js";
-import { composeIsolationWarnings, portCollisionWarnings, rawPortWarnings } from "../compose/isolation.js";
+import {
+  composeIsolationWarnings,
+  portCollisionWarnings,
+  rawPortWarnings,
+  remapNotes,
+} from "../compose/isolation.js";
+import { decideRemap } from "../compose/override.js";
 import { extractPortMappings } from "../ports/extract.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
+import { allocateWorktreePorts, portLabel } from "../ports/allocate.js";
+import { DEFAULT_ENV_FILE, findEnvSource } from "../sync/env.js";
 import { getRepoInfo } from "../git/repo.js";
 import { ENGINE_PROBE_TIMEOUT_MS, runSafe } from "../utils/exec.js";
 import type { ComposeEngine } from "../compose/engine.js";
@@ -72,9 +79,10 @@ function versionLine(output: string | null): string | undefined {
 
 /**
  * Diagnose the setup: git, repo layout, compose file, config, compose
- * engine and daemon, port isolation, isolation-breaking compose settings,
- * worktree/registry health, and host ports already taken for stopped stacks.
- * Each check is independent so one failure never hides the others.
+ * engine and daemon, port isolation (including what is remapped at
+ * runtime), isolation-breaking compose settings, worktree/registry health,
+ * and host ports already taken for stopped stacks. Each check is
+ * independent so one failure never hides the others.
  */
 export async function doctor(io: CoreIo): Promise<DoctorResult> {
   const checks: DoctorCheck[] = [];
@@ -201,22 +209,67 @@ export async function doctor(io: CoreIo): Promise<DoctorResult> {
 
   // ports and isolation
   const mappings = extractPortMappings(composeFile.services);
-  const isolatable = mappings.filter((m) => m.envVar !== null);
+  const remap = decideRemap({
+    composeFile,
+    mappings,
+    mainRoot: repo.mainRoot,
+    commonDir: repo.commonDir,
+    envFiles: [
+      findEnvSource(repo.mainRoot, { dir: "", label: "root", envFileName: config?.envFile ?? DEFAULT_ENV_FILE }),
+      path.join(repo.mainRoot, DEFAULT_ENV_FILE),
+    ],
+    envOverrides: config?.envOverrides,
+    engine: () => {
+      if (!engine || !composeWorks) throw new Error("no working compose engine");
+      return engine;
+    },
+  });
+  const remapped = remap.targets?.ports ?? [];
+  const isolatable = [
+    ...mappings.filter((m) => m.envVar !== null).map((m) => `${m.serviceName}:${m.envVar}`),
+    ...remapped.map((m) => `${m.serviceName}:${m.defaultPort} (remapped at runtime)`),
+  ];
   if (mappings.length === 0) {
     add({ status: "ok", title: "No published ports" });
   } else {
     add({
       status: "ok",
       title: `${isolatable.length} isolatable port(s)`,
-      detail: isolatable.map((m) => `${m.serviceName}:${m.envVar}`).join(", ") || undefined,
+      detail: isolatable.join(", ") || undefined,
     });
   }
-  for (const w of rawPortWarnings(mappings)) {
+  if (remap.targets) {
+    add({
+      status: "ok",
+      title: "Hardcoded settings remapped at runtime (compose file unchanged)",
+      detail: remapNotes(remap.targets, mappings).join(" "),
+    });
+  }
+  if (remap.problem) {
+    add({
+      status: "warn",
+      title: "Runtime remapping unavailable",
+      detail: remap.problem,
+      hint: "Or change the compose file as the warnings below suggest.",
+    });
+  }
+  for (const w of remap.warnings) {
+    add({ status: "warn", title: "Not remapped", detail: w });
+  }
+  for (const w of rawPortWarnings(mappings, remapped)) {
     add({ status: "warn", title: "Raw port mapping (not isolated)", detail: w });
   }
-  const isolation = composeIsolationWarnings(composeFile);
+  const isolation = composeIsolationWarnings(
+    composeFile,
+    new Set(remap.targets?.containerNames.map((c) => c.service)),
+  );
   if (isolation.length === 0) {
-    add({ status: "ok", title: "No container_name or shared volumes/networks" });
+    add({
+      status: "ok",
+      title: remap.targets?.containerNames.length
+        ? "No shared volumes/networks (container_name is dropped at runtime)"
+        : "No container_name or shared volumes/networks",
+    });
   }
   for (const w of isolation) {
     add({ status: "warn", title: "Isolation", detail: w });
@@ -240,7 +293,7 @@ export async function doctor(io: CoreIo): Promise<DoctorResult> {
     ...ctx.orphans.map((o) => o.index),
     ...ctx.unavailable.map((u) => u.index),
   ];
-  const collisions = portCollisionWarnings(ctx.portMappings, ctx.portStride, indices);
+  const collisions = portCollisionWarnings(ctx.portMappings, ctx.portStride, indices, remapped);
   if (collisions.length === 0) {
     add({ status: "ok", title: "No cross-worktree port collisions" });
   }
@@ -280,14 +333,14 @@ export async function doctor(io: CoreIo): Promise<DoctorResult> {
     probed++;
     let allocations;
     try {
-      allocations = allocateWorktreePorts(ctx.portMappings, wt.index, ctx.portStride);
+      allocations = allocateWorktreePorts(ctx.portMappings, wt.index, ctx.portStride, remapped);
     } catch (err) {
       add({ status: "fail", title: `Worktree ${wt.index}: cannot allocate ports`, detail: message(err) });
       continue;
     }
     for (const a of allocations) {
       if (await isPortBusy(a.port)) {
-        busy.push(`worktree ${wt.index} (${wt.branch}) ${a.envVar}=${a.port}`);
+        busy.push(`worktree ${wt.index} (${wt.branch}) ${portLabel(a)}=${a.port}`);
       }
     }
   }
