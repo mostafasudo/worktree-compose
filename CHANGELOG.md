@@ -4,7 +4,7 @@ All notable changes to worktree-compose (`wtc`) are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-11-20
 
 Hardcoded host ports and `container_name` no longer have to be edited out of the compose file: `wtc` remaps them for each worktree stack at runtime. Thanks to [@cokeeffe](https://github.com/cokeeffe) for the idea ([#12](https://github.com/mostafasudo/worktree-compose/issues/12)).
 
@@ -139,6 +139,7 @@ Thanks to [@DarellYuhu](https://github.com/DarellYuhu) for monorepo env targetin
 
 - Initial release: `wtc start`, `stop`, `restart`, `list`, `promote`, `clean`, and `mcp`; per-worktree port allocation from `${VAR:-default}` host ports; env file injection; infra file sync; `.wtcrc.json` config.
 
+[1.1.0]: https://github.com/mostafasudo/worktree-compose/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mostafasudo/worktree-compose/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/mostafasudo/worktree-compose/compare/v0.1.4...v0.2.0
 [0.1.4]: https://github.com/mostafasudo/worktree-compose/compare/v0.1.3...v0.1.4
