@@ -77,12 +77,13 @@ export interface InjectOptions {
 export const COMPOSE_FILE_VAR = "COMPOSE_FILE";
 
 /**
- * A value compose reads back exactly: single-quoted dotenv values are
- * literal, so a `$` in a path is not interpolated. (A path with a `'` in
- * it is written as it is.)
+ * A value compose reads back exactly, `$` included: single-quoted dotenv
+ * values are literal; one with a `'` in it is double-quoted, with `\`, `"`
+ * and `$` escaped (compose reads `\$` as a literal `$`).
  */
 export function literalEnvValue(value: string): string {
-  return value.includes("'") ? value : `'${value}'`;
+  if (!value.includes("'")) return `'${value}'`;
+  return `"${value.replace(/[\\"$]/g, (c) => `\\${c}`)}"`;
 }
 
 /**

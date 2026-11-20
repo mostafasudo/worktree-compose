@@ -9,7 +9,7 @@ import { stateDir } from "../state/registry.js";
 import { COMPOSE_FILE_VAR } from "../sync/env.js";
 import { COMPOSE_FILENAMES } from "./detect.js";
 import { composeArgs, composeBin } from "./engine.js";
-import { isProjectScopedName, portEntryString } from "./parse.js";
+import { isProjectScopedName, parseContainerRefs, portEntryString } from "./parse.js";
 import type { ComposeEngine } from "./engine.js";
 import type { ComposeFile, ComposeService } from "./types.js";
 import type { PortAllocation, PortMapping } from "../ports/types.js";
@@ -156,19 +156,19 @@ function parseComposeYaml(text: string): unknown {
   return doc.toJS();
 }
 
-/** Keys each service sets in a compose file, or null when it cannot be read. */
-function serviceKeys(file: string): Map<string, Set<string>> | null {
+/** Each service's definition in a compose file, or null when it cannot be read. */
+function serviceDefs(file: string): Map<string, Record<string, unknown>> | null {
   let doc: unknown;
   try {
     doc = parseComposeYaml(fs.readFileSync(file, "utf-8"));
   } catch {
     return null;
   }
-  const out = new Map<string, Set<string>>();
+  const out = new Map<string, Record<string, unknown>>();
   const services = doc && typeof doc === "object" ? (doc as Record<string, unknown>).services : null;
   if (services && typeof services === "object") {
     for (const [name, svc] of Object.entries(services as Record<string, unknown>)) {
-      if (svc && typeof svc === "object") out.set(name, new Set(Object.keys(svc)));
+      if (svc && typeof svc === "object") out.set(name, svc as Record<string, unknown>);
     }
   }
   return out;
@@ -177,9 +177,11 @@ function serviceKeys(file: string): Map<string, Set<string>> | null {
 /**
  * Leave alone what the user's own compose override in `dir` also sets for
  * a service (`ports` or `extends`, `container_name`): replacing it would
- * discard theirs. Where it sets the service's networks, the old container
- * name gets no alias (theirs could be `network_mode`). Returns what
- * remains, with a warning for each setting left alone.
+ * discard theirs. A container name one of its services joins by name
+ * (`network_mode: container:<name>`, …) is kept too. Where it sets the
+ * service's networks, the old container name gets no alias (theirs could
+ * be `network_mode`). Returns what remains, with a warning for each
+ * setting left alone.
  */
 export function withoutUserOverride(
   targets: RemapTargets,
@@ -188,14 +190,18 @@ export function withoutUserOverride(
   const file = findUserOverride(dir);
   if (!file || remapIsEmpty(targets)) return { targets, warnings: [] };
   const name = path.basename(file);
-  const keys = serviceKeys(file);
-  if (!keys) {
+  const defs = serviceDefs(file);
+  if (!defs) {
     return {
       targets: { ports: [], containerNames: [] },
       warnings: [`Could not read ${name}, so wtc does not remap hardcoded ports or container_name at runtime.`],
     };
   }
-  const sets = (service: string, key: string) => keys.get(service)?.has(key) === true;
+  const sets = (service: string, key: string) => defs.get(service)?.[key] !== undefined;
+  const joinedBy = new Map<string, string>();
+  for (const [service, def] of defs) {
+    for (const ref of parseContainerRefs(def)) if (!joinedBy.has(ref)) joinedBy.set(ref, service);
+  }
   const warnings: string[] = [];
   const skippedPorts = new Set(
     targets.ports
@@ -208,6 +214,13 @@ export function withoutUserOverride(
   const containerNames = targets.containerNames.flatMap((c) => {
     if (sets(c.service, "container_name")) {
       warnings.push(`Service "${c.service}": ${name} also sets container_name, so wtc does not drop it.`);
+      return [];
+    }
+    const by = joinedBy.get(c.name);
+    if (by) {
+      warnings.push(
+        `Service "${c.service}": service "${by}" in ${name} joins container:${c.name} by name, so wtc does not drop its container_name.`,
+      );
       return [];
     }
     return sets(c.service, "networks") || sets(c.service, "network_mode") || sets(c.service, "extends")
@@ -284,7 +297,21 @@ export function isWtcComposeFile(value: string, commonDir: string): boolean {
   if (files.length < 2 || files.length > 3) return false;
   if (path.dirname(path.resolve(files[files.length - 1])) !== dir) return false;
   if (!COMPOSE_FILENAMES.includes(path.basename(files[0]))) return false;
-  return files.length === 2 || USER_OVERRIDE_FILENAMES.includes(path.basename(files[1]));
+  if (files.length === 2) return true;
+  // The compose override wtc lists is the one next to the compose file.
+  return (
+    USER_OVERRIDE_FILENAMES.includes(path.basename(files[1])) &&
+    path.dirname(path.resolve(files[1])) === path.dirname(path.resolve(files[0]))
+  );
+}
+
+/**
+ * Whether the inherited `COMPOSE_FILE` names `file`: a list the shell still
+ * holds (direnv, or one the user extended) would break if it were deleted.
+ */
+export function inheritedComposeFileNames(file: string): boolean {
+  const value = process.env[COMPOSE_FILE_VAR];
+  return !!value && value.split(composePathSeparator()).some((f) => f.trim() && path.resolve(f.trim()) === file);
 }
 
 /** A `COMPOSE_FILE` the user set (not one wtc wrote), from a value. */
@@ -557,6 +584,10 @@ export function decideRemap(inputs: RemapInputs): RemapDecision {
   }
   if (inputs.envOverrides && COMPOSE_FILE_VAR in inputs.envOverrides) {
     return cannot("envOverrides sets COMPOSE_FILE, and wtc would replace it");
+  }
+  const separator = inputs.envOverrides?.COMPOSE_PATH_SEPARATOR;
+  if (separator !== undefined && separator !== composePathSeparator()) {
+    return cannot("envOverrides sets COMPOSE_PATH_SEPARATOR, which would split wtc's COMPOSE_FILE differently");
   }
   let engine: ComposeEngine;
   try {

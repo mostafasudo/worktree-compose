@@ -4,7 +4,7 @@ import { buildContext, getEnvTargets } from "../context.js";
 import { samePath } from "../git/worktree.js";
 import { recordEnvFiles } from "../state/registry.js";
 import { allocateWorktreePorts, portLabel, portsByLabel } from "../ports/allocate.js";
-import { overridePath, removeOverride } from "../compose/override.js";
+import { inheritedComposeFileNames, overridePath, removeOverride } from "../compose/override.js";
 import { syncWorktreeFiles } from "../sync/files.js";
 import { findEnvSource, injectPortOverrides, prepareEnvFile } from "../sync/env.js";
 import { selectWorktrees } from "../selectors.js";
@@ -101,7 +101,9 @@ export async function startWorktrees(
 
     // After the sync: the worktree's own compose override may be a synced file.
     const stack = prepareStack(ctx, { project: wt.project, index: wt.index, dir: wt.path }, { write: true });
-    if (stack.composeFile === null) removeOverride(overridePath(ctx.repo.commonDir, wt.project));
+    // A stale override goes, unless an inherited COMPOSE_FILE still lists it.
+    const overrideFile = overridePath(ctx.repo.commonDir, wt.project);
+    if (stack.composeFile === null && !inheritedComposeFileNames(overrideFile)) removeOverride(overrideFile);
     for (const w of stack.warnings) reporter.warn(w);
     const allocations = stack.allocations;
     reporter.info(

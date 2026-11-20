@@ -302,6 +302,22 @@ export async function doctor(io: CoreIo): Promise<DoctorResult> {
     add({ status: "warn", title: "Port collisions", detail: w });
   }
 
+  // As start sees each worktree: its own compose override counts, and a
+  // port may have nowhere to move at that worktree's index.
+  const withRemap = { ...ctx, remap: remap.targets };
+  if (remap.targets) {
+    for (const wt of [...ctx.worktrees].sort((a, b) => a.index - b.index)) {
+      let notes: string[];
+      try {
+        const own = stackRemap(withRemap, wt.path, wt.project);
+        notes = [...own.warnings, ...stackAllocations(withRemap, wt.index, own.targets).warnings];
+      } catch {
+        continue; // reported by the busy-port check below
+      }
+      for (const n of notes) add({ status: "warn", title: `Worktree ${wt.index}: not remapped`, detail: n });
+    }
+  }
+
   // Missing worktrees, registry problems, skipped sync entries.
   for (const w of ctx.warnings) {
     add({ status: "warn", title: w });
@@ -335,7 +351,6 @@ export async function doctor(io: CoreIo): Promise<DoctorResult> {
     let allocations;
     try {
       // As start allocates them: this worktree's own compose override counts.
-      const withRemap = { ...ctx, remap: remap.targets };
       allocations = stackAllocations(withRemap, wt.index, stackRemap(withRemap, wt.path, wt.project).targets).allocations;
     } catch (err) {
       add({ status: "fail", title: `Worktree ${wt.index}: cannot allocate ports`, detail: message(err) });

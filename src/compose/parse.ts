@@ -88,7 +88,7 @@ function parseExtends(ext: unknown): ComposeService["extendsFrom"] {
  * Container names a service joins by name: `network_mode`, `ipc` or `pid`
  * set to `container:<name>`, and `volumes_from: [container:<name>[:ro]]`.
  */
-function parseContainerRefs(s: Record<string, unknown>): string[] {
+export function parseContainerRefs(s: Record<string, unknown>): string[] {
   const refs: string[] = [];
   const add = (v: unknown) => {
     if (typeof v === "string" && v.startsWith("container:")) {

@@ -82,12 +82,8 @@ export function stackRemap(
   project: string,
 ): { targets: RemapTargets | null; warnings: string[] } {
   if (!ctx.remap) return { targets: null, warnings: [] };
-  const dotenv = path.join(dir, ".env");
-  const separator = envFileValue(dotenv, "COMPOSE_PATH_SEPARATOR");
-  if (
-    isUserComposeFile(envFileComposeFile(dotenv), ctx.repo.commonDir) ||
-    (separator && separator !== composePathSeparator())
-  ) {
+  const separator = separatorConflicts(dir);
+  if (separator || isUserComposeFile(envFileComposeFile(path.join(dir, ".env")), ctx.repo.commonDir)) {
     return {
       targets: null,
       warnings: [
@@ -97,6 +93,12 @@ export function stackRemap(
   }
   const { targets, warnings } = withoutUserOverride(ctx.remap, dir);
   return { targets: remapIsEmpty(targets) ? null : targets, warnings };
+}
+
+/** Whether `dir`'s `.env` sets a `COMPOSE_PATH_SEPARATOR` that would split wtc's list differently. */
+function separatorConflicts(dir: string): boolean {
+  const separator = envFileValue(path.join(dir, ".env"), "COMPOSE_PATH_SEPARATOR");
+  return !!separator && separator !== composePathSeparator();
 }
 
 /** Host ports a stack keeps as written: hardcoded ones wtc does not move, ranges whole. */
@@ -122,21 +124,28 @@ export function stackAllocations(
     return { allocations: allocateWorktreePorts(ctx.portMappings, index, ctx.portStride), targets: null, warnings: [] };
   }
   const allocations = allocateWorktreePorts(ctx.portMappings, index, ctx.portStride, targets.ports);
-  const kept = keptHostPorts(ctx.portMappings, targets.ports);
   const stays = new Map<number, string>();
-  for (const m of targets.ports) {
-    if (stays.has(m.defaultPort)) continue;
-    const a = allocations.find((x) => x.defaultPort === m.defaultPort);
-    if (!a) {
-      stays.set(
-        m.defaultPort,
-        `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} has no free port to move to in worktree ${index} (ports end at 65535), so it stays ${m.defaultPort}.`,
-      );
-    } else if (a.envVar === null && kept.some(([from, to]) => a.port >= from && a.port <= to)) {
-      stays.set(
-        m.defaultPort,
-        `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} would move to ${a.port}, which this stack already publishes, so it stays ${m.defaultPort}.`,
-      );
+  // A port that stays is one the stack keeps, which can block another
+  // port's move in turn: repeat until nothing more has to stay.
+  for (let moving = targets.ports, changed = true; changed; moving = moving.filter((m) => !stays.has(m.defaultPort))) {
+    changed = false;
+    const kept = keptHostPorts(ctx.portMappings, moving);
+    for (const m of moving) {
+      if (stays.has(m.defaultPort)) continue;
+      const a = allocations.find((x) => x.defaultPort === m.defaultPort);
+      if (!a) {
+        stays.set(
+          m.defaultPort,
+          `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} has no free port to move to in worktree ${index} (ports end at 65535), so it stays ${m.defaultPort}.`,
+        );
+        changed = true;
+      } else if (a.envVar === null && kept.some(([from, to]) => a.port >= from && a.port <= to)) {
+        stays.set(
+          m.defaultPort,
+          `Service "${m.serviceName}": hardcoded host port ${m.defaultPort} would move to ${a.port}, which this stack already publishes, so it stays ${m.defaultPort}.`,
+        );
+        changed = true;
+      }
     }
   }
   if (stays.size === 0) return { allocations, targets, warnings: [] };
@@ -174,7 +183,8 @@ export function prepareStack(ctx: WtcContext, target: StackTarget, opts: { write
   const stack = stackAllocations(ctx, target.index, remap.targets);
   const warnings = [...remap.warnings, ...stack.warnings];
 
-  if (!opts.write && fs.existsSync(file)) {
+  // A separator the worktree's `.env` set since would split the list wrongly.
+  if (!opts.write && fs.existsSync(file) && !separatorConflicts(target.dir)) {
     const composeFile = filesWith(file);
     if (composeFile !== null) return { allocations: stack.allocations, composeFile, warnings: [] };
   }

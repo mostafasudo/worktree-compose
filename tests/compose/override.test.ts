@@ -22,6 +22,7 @@ import {
 import { extractPortMappings } from "../../src/ports/extract.js";
 import { allocateWorktreePorts } from "../../src/ports/allocate.js";
 import { runSafe } from "../../src/utils/exec.js";
+import { literalEnvValue } from "../../src/sync/env.js";
 import type { ComposeEngine } from "../../src/compose/engine.js";
 import type { RemapInputs } from "../../src/compose/override.js";
 
@@ -313,6 +314,17 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
     expect(withoutUserOverride(targets, tmp).targets.ports.map((m) => m.serviceName)).toEqual(["db"]);
   });
 
+  it("keeps a container name a service in the user's compose override joins by name", () => {
+    const { composeFile, mappings } = model();
+    const { targets } = remapCandidates(composeFile, mappings);
+    write(tmp, "compose.override.yaml", "services:\n  sidecar:\n    image: x\n    network_mode: container:web\n");
+    const result = withoutUserOverride(targets, tmp);
+    expect(result.targets.containerNames).toEqual([]);
+    expect(result.warnings).toEqual([
+      'Service "web": service "sidecar" in compose.override.yaml joins container:web by name, so wtc does not drop its container_name.',
+    ]);
+  });
+
   it("gives no alias where the user's compose override sets the service's networks", () => {
     const { composeFile, mappings } = model();
     const { targets } = remapCandidates(composeFile, mappings);
@@ -341,6 +353,12 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
     expect(envFileComposeFile(write(tmp, "c.env", "# COMPOSE_FILE=x\nMY_COMPOSE_FILE=y\n"))).toBeNull();
     expect(envFileComposeFile(path.join(tmp, "missing.env"))).toBeNull();
     expect(envFileComposeFile(null)).toBeNull();
+  });
+
+  it("writes COMPOSE_FILE so compose reads it literally, $ and ' included", () => {
+    expect(literalEnvValue("/w/app/compose.yaml:/g/x.yaml")).toBe("'/w/app/compose.yaml:/g/x.yaml'");
+    expect(literalEnvValue("/w/$APP/compose.yaml")).toBe("'/w/$APP/compose.yaml'");
+    expect(literalEnvValue("/w/o'brien/$APP/c.yaml")).toBe('"/w/o\'brien/\\$APP/c.yaml"');
   });
 
   it("reads the probe's config output from docker compose and from podman-compose", () => {
@@ -402,6 +420,9 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
       // Another separator would split wtc's list into one missing file.
       const sep = write(tmp, "sep.env", "COMPOSE_PATH_SEPARATOR=|\n");
       expect(decideRemap(inputs(() => ok, { envFiles: [sep] })).problem).toMatch(/sep\.env sets COMPOSE_PATH_SEPARATOR/);
+      expect(decideRemap(inputs(() => ok, { envOverrides: { COMPOSE_PATH_SEPARATOR: "|" } })).problem).toMatch(
+        /envOverrides sets COMPOSE_PATH_SEPARATOR/,
+      );
 
       process.env.COMPOSE_FILE = "compose.yaml";
       const decision = decideRemap(inputs(() => ok));
@@ -424,6 +445,10 @@ describe("runtime remapping of hardcoded ports and container_name", () => {
       // Anything else in the list makes it the user's.
       expect(isWtcComposeFile(`${process.env.COMPOSE_FILE}${path.delimiter}${path.join(tmp, "wt", "compose.debug.yaml")}`, commonDir)).toBe(false);
       expect(isWtcComposeFile(composeFileValue([path.join(tmp, "wt", "compose.debug.yaml"), wtcFile])!, commonDir)).toBe(false);
+      // A compose override from another directory is not the one wtc lists.
+      expect(
+        isWtcComposeFile(composeFileValue([path.join(tmp, "wt", "compose.yaml"), path.join(tmp, "other", "compose.override.yaml"), wtcFile])!, commonDir),
+      ).toBe(false);
       expect(isWtcComposeFile(path.join(tmp, "compose.dev.yaml"), commonDir)).toBe(false);
       const decision = decideRemap(inputs(() => ok));
       expect(decision.problem).toBeNull();

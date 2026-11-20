@@ -334,4 +334,58 @@ describe("runtime remapping of hardcoded ports and container_name (fake engine)"
       `⚠ ${project}: its .env sets COMPOSE_PATH_SEPARATOR, so wtc does not remap hardcoded ports or container_name for it.`,
     );
   });
+
+  it("leaves a port alone when another port staying blocks its move (cascading)", async () => {
+    engine.setComposeHook(remapHook(base));
+    write(root, "compose.yaml", 'services:\n  x:\n    image: x\n    ports:\n      - "28080:80"\n      - "8079:81"\n      - "48081-48082:82-83"\n');
+    const reporter = new CollectingReporter();
+
+    const result = await startWorktrees({ worktrees: ["feat"], build: false }, reporter, { live: false, cwd: root });
+
+    expect(result.started[0].ports).toEqual({});
+    expect(fs.existsSync(override())).toBe(false);
+    expect(reporter.lines).toContain(
+      '⚠ Service "x": hardcoded host port 28080 would move to 48081, which this stack already publishes, so it stays 28080.',
+    );
+    expect(reporter.lines).toContain(
+      '⚠ Service "x": hardcoded host port 8079 would move to 28080, which this stack already publishes, so it stays 8079.',
+    );
+  });
+
+  it("doctor reports a port that can move in one worktree but not in another", async () => {
+    engine.setComposeHook(remapHook(base));
+    write(root, "compose.yaml", 'services:\n  edge:\n    image: x\n    ports:\n      - "65400:65400"\n');
+    addWorktree(root, base, "remaprepo-two", "two");
+
+    const report = await doctor({ live: false, cwd: root });
+
+    const notes = report.checks.filter((c) => c.title.endsWith("not remapped")).map((c) => `${c.title}: ${c.detail}`);
+    expect(notes).toEqual([
+      'Worktree 2: not remapped: Service "edge": hardcoded host port 65400 has no free port to move to in worktree 2 (ports end at 65535), so it stays 65400.',
+    ]);
+  });
+
+  it("stop leaves wtc's list out when the worktree's .env now splits it differently", async () => {
+    engine.setComposeHook(remapHook(base));
+    await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: root });
+    fs.appendFileSync(path.join(wt, ".env"), "COMPOSE_PATH_SEPARATOR=|\n");
+
+    await stopWorktrees({ worktrees: ["feat"] }, silentReporter, { live: false, cwd: root });
+
+    expect(calls()[1]).toEqual({ args: `-p ${project} stop`, composeFile: null });
+  });
+
+  it("start keeps an override the shell's COMPOSE_FILE still lists, even when it no longer remaps", async () => {
+    engine.setComposeHook(remapHook(base));
+    await startWorktrees({ worktrees: ["feat"], build: false }, silentReporter, { live: false, cwd: root });
+    const exported = /^COMPOSE_FILE='(.*)'$/m.exec(fs.readFileSync(path.join(wt, ".env"), "utf-8"))![1];
+    // The user added a file to the list direnv exported: it is theirs now.
+    process.env.COMPOSE_FILE = `${exported}${path.delimiter}${path.join(wt, "compose.debug.yaml")}`;
+
+    const reporter = new CollectingReporter();
+    await startWorktrees({ worktrees: ["feat"], build: false }, reporter, { live: false, cwd: root });
+
+    expect(reporter.lines.join("\n")).toMatch(/COMPOSE_FILE is set in the environment/);
+    expect(fs.existsSync(override())).toBe(true);
+  });
 });
