@@ -66,7 +66,7 @@ export async function listCommand(
 
   for (const row of result.rows) {
     const ports = Object.entries(row.ports)
-      .map(([envVar, port]) => `${envVar}=${port}`)
+      .map(([label, port]) => `${label}=${port}`)
       .join(" ");
     if (row.orphan || row.unavailable) {
       const note = row.orphan

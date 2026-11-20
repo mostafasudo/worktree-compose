@@ -1,6 +1,7 @@
 import { buildContext } from "../context.js";
 import { runSafe } from "../utils/exec.js";
 import { forgetRecords } from "../state/registry.js";
+import { overridePath, removeOverride } from "../compose/override.js";
 import { reportContextWarnings, throwIfAborted } from "./compose.js";
 import { orphanSkipReason, teardownStack } from "./teardown.js";
 import type { Reporter } from "../utils/log.js";
@@ -32,7 +33,8 @@ export async function prune(
   io: CoreIo,
 ): Promise<PruneResult> {
   const dryRun = options.dryRun === true;
-  const ctx = buildContext({}, { cwd: io.cwd, allowMissingCompose: true, readOnly: dryRun });
+  // resolveRemap: tear stacks down with the compose files they were started with.
+  const ctx = buildContext({}, { cwd: io.cwd, allowMissingCompose: true, readOnly: dryRun, resolveRemap: !dryRun });
   reportContextWarnings(ctx, reporter, { isolation: false });
   const result: PruneResult = { dryRun, orphans: [], skipped: [], gitPruned: [], failures: 0 };
 
@@ -82,6 +84,7 @@ export async function prune(
       runSafe("git", ["-C", ctx.repoRoot, "worktree", "prune"]);
     }
     forgetRecords(ctx.repo.commonDir, forget);
+    for (const project of forget) removeOverride(overridePath(ctx.repo.commonDir, project));
   }
 
   const failed = result.orphans.filter((o) => !o.ok).length;

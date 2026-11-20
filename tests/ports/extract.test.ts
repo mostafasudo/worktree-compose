@@ -1,6 +1,7 @@
 import {
   extractPortMappings,
   suggestEnvVar,
+  suggestEnvVars,
 } from "../../src/ports/extract.js";
 import type { ComposeService } from "../../src/compose/types.js";
 
@@ -101,5 +102,34 @@ describe("suggestEnvVar", () => {
     expect(suggestEnvVar("nginx")).toBe("NGINX_PORT");
     expect(suggestEnvVar("my-api")).toBe("MY_API_PORT");
     expect(suggestEnvVar("frontend_app")).toBe("FRONTEND_APP_PORT");
+  });
+});
+
+describe("hardcoded port ranges and suggested variable names", () => {
+  it("flags a host port range, which no single allocated port can replace", () => {
+    const result = extractPortMappings([svc("ftp", ["21000-21010:21000-21010", "2121:21"])]);
+    expect(result.map((m) => [m.raw, m.range === true])).toEqual([
+      ["21000-21010:21000-21010", true],
+      ["2121:21", false],
+    ]);
+  });
+
+  it("needs a whole number for a hardcoded host port: an interpolated range end is not port 8000", () => {
+    expect(extractPortMappings([svc("web", ["8000-${PORT_END:-8010}:80"])])).toEqual([]);
+    const [rtp] = extractPortMappings([svc("rtp", ["10000-10100:10000-10100"])]);
+    expect(rtp).toMatchObject({ defaultPort: 10000, rangeEnd: 10100, range: true });
+  });
+
+  it("ignores host port 0 (the engine picks any free port, so it never collides)", () => {
+    expect(extractPortMappings([svc("web", ["0:80", "8080:80"])]).map((m) => m.raw)).toEqual(["8080:80"]);
+  });
+
+  it("suggests a distinct variable for each hardcoded port, never one the file already uses", () => {
+    const mappings = extractPortMappings([
+      svc("web", ["8080:80", "8443:443"]),
+      svc("api", ["${API_PORT:-3000}:3000", "9229:9229"]),
+    ]);
+    const names = [...suggestEnvVars(mappings).values()];
+    expect(names).toEqual(["WEB_PORT", "WEB_443_PORT", "API_9229_PORT"]);
   });
 });

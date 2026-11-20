@@ -1,7 +1,7 @@
 import { buildContext } from "../context.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
 import { selectWorktrees } from "../selectors.js";
-import { composeEnv, composeRun, reportContextWarnings, throwIfAborted } from "./compose.js";
+import { composeEnv, composeRun, prepareStack, reportContextWarnings, throwIfAborted } from "./compose.js";
+import type { ComposeCallEnv } from "./compose.js";
 import type { WorktreeSelector } from "../selectors.js";
 import type { Reporter } from "../utils/log.js";
 import type { CoreIo } from "./types.js";
@@ -52,12 +52,11 @@ export async function stopWorktrees(
     throwIfAborted(io);
     reporter.info(`Stopping ${wt.project}...`);
     const entry = { index: wt.index, branch: wt.branch, project: wt.project };
-    let env: Record<string, string> | undefined;
+    let env: ComposeCallEnv | undefined;
     try {
-      env = composeEnv(
-        wt.project,
-        allocateWorktreePorts(ctx.portMappings, wt.index, ctx.portStride),
-      );
+      // The compose files the stack was started with (runtime override included).
+      const stack = prepareStack(ctx, { project: wt.project, index: wt.index, dir: wt.path }, { write: false });
+      env = composeEnv(wt.project, stack.allocations, stack.composeFile, ctx.repo.commonDir);
     } catch {
       env = undefined;
     }

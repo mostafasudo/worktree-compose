@@ -30,14 +30,14 @@ Prefer `.` (the worktree containing the current directory) when working inside a
 
 | Command | Effect |
 |---------|--------|
-| `wtc start [wt...] [--env <file>] [--workspace <ws>]... [--no-build]` | Sync compose/Dockerfiles/`sync` paths from main, copy env files fresh from main, inject ports + `COMPOSE_PROJECT_NAME`, `compose up -d --build`. Stops at the first failure. |
+| `wtc start [wt...] [--env <file>] [--workspace <ws>]... [--no-build]` | Sync compose/Dockerfiles/`sync` paths from main, copy env files fresh from main, inject ports + `COMPOSE_PROJECT_NAME`, remap hardcoded host ports and `container_name` at runtime, `compose up -d --build`. Stops at the first failure. |
 | `wtc stop [wt...]` | `compose stop`. Containers and **all volumes are kept**. |
 | `wtc restart [wt...] [same flags]` | `compose stop`, then start with `--remove-orphans`; changed services are recreated, volumes kept. |
 | `wtc list` / `wtc ls` `[--json]` | Read-only. Rows: `index, branch, path, project, status, running, total, url, ports, orphan, unavailable`. Status: `up`, `partial`, `exited` (stopped), `down` (no containers), `?` (engine unreachable). `unavailable`: `"missing"` (locked, directory missing — e.g. unmounted drive), `"main"` (became the main checkout), or `null`. |
 | `wtc promote <wt> [--force]` | Copy the worktree's changes (committed since it branched, staged, unstaged, untracked; deletions too) into the checkout you run it from, uncommitted. Skips compose files and local env files. |
 | `wtc prune [--dry-run]` | Tear down (`down -v`, **deletes volumes**) and forget stacks of worktrees that were already deleted. |
 | `wtc clean [--dry-run] [--force] [--keep-worktrees] [--sweep]` | `down -v` on **every** stack (**deletes all their volumes**), remove worktrees that hold no work, sweep leftovers this checkout owns. |
-| `wtc doctor [--json]` | Diagnose git, compose file, config, engine + daemon, port isolation, `container_name` / shared volumes, collisions, orphans, busy ports. Exit 1 on any ✖. |
+| `wtc doctor [--json]` | Diagnose git, compose file, config, engine + daemon, port isolation (and what is remapped at runtime, or why not), `container_name` / shared volumes, collisions, orphans, busy ports. Exit 1 on any ✖. |
 | `wtc skill [--install] [--dir <path>]` | Print this skill, or install it to `~/.claude/skills/worktree-compose/SKILL.md` (or `<path>/worktree-compose/`). |
 | `wtc mcp` | MCP server on stdio. |
 
@@ -53,7 +53,7 @@ Prefer `.` (the worktree containing the current directory) when working inside a
 - A worktree's index and compose project are recorded in `.git/wtc/state.json` the first time wtc acts on it (`list`, `doctor` and dry runs only read) and never change: removing a worktree never renumbers the others, renaming its branch keeps the project, `git worktree move` keeps everything. A new worktree gets the lowest free index.
 - A deleted worktree becomes an orphan: `wtc list` shows `(removed)` and its index stays reserved until `wtc prune` or `wtc clean`. A worktree git still lists is never an orphan: a locked one whose directory is missing shows `(locked, missing on disk)` and `prune`/`clean` leave its stack alone.
 - If wtc cannot tell which checkout is the main one (bare repo whose default-branch worktree is mid-rebase/on another branch, or a `--separate-git-dir` repo seen from a linked worktree before wtc ran in the main checkout), `start`, `restart` and `clean` refuse with the fix in the message; tell the user rather than working around it.
-- Ports: `20000 + default_port + index × portStride` (`portStride` default `1`). Only host ports written as `${VAR:-default}` (upper-case `VAR`) are isolated; hardcoded ones are warned about.
+- Ports: `20000 + default_port + index × portStride` (`portStride` default `1`). A host port written as `${VAR:-default}` (upper-case `VAR`) gets `VAR` in the worktree's env file. A hardcoded one (`"8080:80"`) and a fixed `container_name` are remapped at runtime by a generated compose override in `.git/wtc/compose/` (needs Docker Compose 2.24.4+; the compose file is never edited; the old container name stays a network alias inside the stack). A remapped port has no variable: `wtc list` shows it as `<service>:<default port>` (`web:8080=28081`). With an engine that can't remap, hardcoded ports and `container_name` are only warned about.
 - Project: `{repo}-wt-{index}-{branch}`, sanitized (e.g. `myapp-wt-1-feature-auth`).
 
 ## Env files
@@ -61,7 +61,7 @@ Prefer `.` (the worktree containing the current directory) when working inside a
 - Every start/restart copies `<envFile>` (default `.env`, fallback `.env.example`) **fresh from main**, then writes `COMPOSE_PROJECT_NAME` (root only), the allocated `*_PORT` variables, and `envOverrides`. Existing keys are rewritten in place; the rest go in a `# --- wtc port overrides ---` block.
 - Edits made only in a worktree's env file are lost on the next start. Put lasting values in main's env file or in `envOverrides` / `workspaceEnvOverrides`.
 - Only those keys are written. A value with a port inside (`DATABASE_URL=…:5434/app`) needs an override: `"DATABASE_URL": "postgresql://app:app@localhost:${POSTGRES_PORT}/app"`. `${COMPOSE_PROJECT_NAME}` interpolates too.
-- With the default `.env`, a plain `docker compose ps|logs|exec` inside the worktree reaches the worktree's stack. With a custom `envFile` (e.g. `.env.development`), add `--env-file .env.development` or `-p <project>` (from `wtc list --json`).
+- With the default `.env`, a plain `docker compose ps|logs|exec` inside the worktree reaches the worktree's stack. When hardcoded settings are remapped, the root env file also gets `COMPOSE_FILE`, so a plain `docker compose up` from the worktree's root uses the same ports (not from a subdirectory: prefer `wtc restart .`). With a custom `envFile` (e.g. `.env.development`), add `--env-file .env.development` or `-p <project>` (from `wtc list --json`); `-p` is enough for `ps|logs|exec`, but `up` needs `--env-file` (it carries the remap's `COMPOSE_FILE`) — or use `wtc restart .`.
 - Monorepos: `--env .env.development --workspace server` (repeatable) also copies and injects `apps/server/.env.development`. Use `--env`, never `--env-file` (Node intercepts it).
 
 ## Promote rules
@@ -74,7 +74,7 @@ Prefer `.` (the worktree containing the current directory) when working inside a
 
 ## Diagnose
 
-Run `wtc doctor` first when a stack won't start, ports look wrong, or `wtc list` shows `?` or `(removed)` rows. Typical fixes: remove `container_name` (or use `${COMPOSE_PROJECT_NAME}`), drop fixed `name:`/`external` on volumes and networks, write host ports as `${VAR:-default}`, raise `portStride` on collisions, `wtc prune` for orphans, start the Docker/Podman daemon or set `WTC_COMPOSE_COMMAND`.
+Run `wtc doctor` first when a stack won't start, ports look wrong, or `wtc list` shows `?` or `(removed)` rows. Typical fixes: drop fixed `name:`/`external` on volumes and networks, raise `portStride` on collisions, give a port a `${VAR:-default}` variable when an env value (e.g. `DATABASE_URL` via `envOverrides`) needs it; where runtime remapping is unavailable, remove `container_name` (or use `${COMPOSE_PROJECT_NAME}`) and write host ports as `${VAR:-default}`; `wtc prune` for orphans, start the Docker/Podman daemon or set `WTC_COMPOSE_COMMAND`.
 
 ## Config (optional)
 

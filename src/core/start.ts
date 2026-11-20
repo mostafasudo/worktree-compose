@@ -3,7 +3,8 @@ import path from "node:path";
 import { buildContext, getEnvTargets } from "../context.js";
 import { samePath } from "../git/worktree.js";
 import { recordEnvFiles } from "../state/registry.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
+import { allocateWorktreePorts, portLabel, portsByLabel } from "../ports/allocate.js";
+import { inheritedComposeFileNames, overridePath, removeOverride } from "../compose/override.js";
 import { syncWorktreeFiles } from "../sync/files.js";
 import { findEnvSource, injectPortOverrides, prepareEnvFile } from "../sync/env.js";
 import { selectWorktrees } from "../selectors.js";
@@ -11,6 +12,7 @@ import {
   composeEnv,
   composeRun,
   NO_WORKTREES_HINT,
+  prepareStack,
   reportContextWarnings,
   throwIfAborted,
   withContext,
@@ -47,7 +49,9 @@ export interface StartResult {
 
 /**
  * Sync infra files, inject ports + project name into env files, and run
- * `compose up -d` for each selected worktree. Stops at the first failure.
+ * `compose up -d` for each selected worktree (with the stack's runtime
+ * override when hardcoded ports or container names are remapped). Stops at
+ * the first failure.
  */
 export async function startWorktrees(
   options: StartOptions,
@@ -83,23 +87,28 @@ export async function startWorktrees(
       );
     }
 
-    const allocations = allocateWorktreePorts(
-      ctx.portMappings,
-      wt.index,
-      ctx.portStride,
-    );
+    // Fail on an unallocatable port before writing anything into the worktree.
+    allocateWorktreePorts(ctx.portMappings, wt.index, ctx.portStride, ctx.remap?.ports);
 
     reporter.header(`Worktree ${wt.index}: ${wt.branch}`);
     reporter.info(`Path:    ${wt.path}`);
     reporter.info(`Project: ${wt.project}`);
-    reporter.info(
-      `Ports:   ${allocations.map((a) => `${a.envVar}=${a.port}`).join(" ") || "(none)"}`,
-    );
 
     const syncWarnings = syncWorktreeFiles(ctx.repoRoot, wt.path, ctx.composeFile, ctx.config.sync);
     // Skipped sync entries were already reported with the context warnings.
     for (const w of syncWarnings) if (!ctx.warnings.includes(w)) reporter.warn(w);
     reporter.success("Synced infrastructure files");
+
+    // After the sync: the worktree's own compose override may be a synced file.
+    const stack = prepareStack(ctx, { project: wt.project, index: wt.index, dir: wt.path }, { write: true });
+    // A stale override goes, unless an inherited COMPOSE_FILE still lists it.
+    const overrideFile = overridePath(ctx.repo.commonDir, wt.project);
+    if (stack.composeFile === null && !inheritedComposeFileNames(overrideFile)) removeOverride(overrideFile);
+    for (const w of stack.warnings) reporter.warn(w);
+    const allocations = stack.allocations;
+    reporter.info(
+      `Ports:   ${allocations.map((a) => `${portLabel(a)}=${a.port}`).join(" ") || "(none)"}`,
+    );
 
     const injected: string[] = [];
     for (const target of envTargets) {
@@ -117,6 +126,7 @@ export async function startWorktrees(
       const injection = injectPortOverrides(envPath, allocations, target.overrides, {
         projectName: wt.project,
         writeProjectName: target.dir === "",
+        ...(target.dir === "" && stack.composeFile ? { composeFile: stack.composeFile } : {}),
         root: wt.path,
         source: findEnvSource(ctx.repoRoot, target) ?? undefined,
       });
@@ -138,7 +148,7 @@ export async function startWorktrees(
         ["up", "-d", ...(build ? ["--build"] : []), ...(options.removeOrphans ? ["--remove-orphans"] : [])],
         {
           cwd: wt.path,
-          env: composeEnv(wt.project, allocations),
+          env: composeEnv(wt.project, allocations, stack.composeFile, ctx.repo.commonDir),
           live: io.live,
           signal: io.signal,
           onLine: io.onOutput,
@@ -154,7 +164,7 @@ export async function startWorktrees(
       branch: wt.branch,
       path: wt.path,
       project: wt.project,
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
     });
   }
 

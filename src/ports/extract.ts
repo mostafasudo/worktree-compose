@@ -7,10 +7,11 @@ function stripProtocol(port: string): string {
   return port.replace(/\/(tcp|udp|sctp)$/i, "");
 }
 
-function splitPortString(raw: string): {
-  host: string;
-  container: string;
-} | null {
+/**
+ * Split a `ports:` string into its `:`-separated segments, keeping `${…}`
+ * interpolations whole. The protocol suffix (`/tcp`) is stripped first.
+ */
+export function portSegments(raw: string): string[] {
   const cleaned = stripProtocol(raw);
 
   const segments: string[] = [];
@@ -41,7 +42,14 @@ function splitPortString(raw: string): {
     current += ch;
   }
   segments.push(current);
+  return segments;
+}
 
+function splitPortString(raw: string): {
+  host: string;
+  container: string;
+} | null {
+  const segments = portSegments(raw);
   if (segments.length === 1) return null;
   if (segments.length === 2)
     return { host: segments[0], container: segments[1] };
@@ -60,9 +68,20 @@ function resolveEnvVar(segment: string): {
   return { envVar: match[1], defaultPort: parseInt(match[2], 10) };
 }
 
+/** `8000-8010`: a port range, which no single allocated port can replace. */
+function rangeOf(segment: string): [number, number] | null {
+  const m = /^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(segment);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+/**
+ * A port number, or the first port of a range. Anything else — `${VAR}`
+ * without a default, `8000-${END:-8010}` — is null: its numeric prefix is
+ * not the port compose publishes.
+ */
 function resolvePort(segment: string): number | null {
-  const n = parseInt(segment, 10);
-  return isNaN(n) ? null : n;
+  if (/^\s*\d+\s*$/.test(segment)) return Number(segment.trim());
+  return rangeOf(segment)?.[0] ?? null;
 }
 
 export function extractPortMappings(
@@ -92,13 +111,17 @@ export function extractPortMappings(
         });
       } else {
         const hostPort = resolvePort(split.host);
-        if (hostPort !== null) {
+        const hostRange = rangeOf(split.host);
+        // Host port 0 asks the engine for any free port: it never collides.
+        if (hostPort !== null && hostPort !== 0) {
           mappings.push({
             serviceName: svc.name,
             envVar: null,
             defaultPort: hostPort,
             containerPort,
             raw,
+            ...(hostRange || rangeOf(split.container) ? { range: true } : {}),
+            ...(hostRange ? { rangeEnd: hostRange[1] } : {}),
           });
         }
       }
@@ -110,4 +133,24 @@ export function extractPortMappings(
 
 export function suggestEnvVar(serviceName: string): string {
   return `${serviceName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_PORT`;
+}
+
+/**
+ * A variable name to suggest for each hardcoded mapping: `<SERVICE>_PORT`,
+ * or `<SERVICE>_<CONTAINER>_PORT` for a service's further ports, never one
+ * the compose file already uses (two ports sharing a name would get the
+ * same value).
+ */
+export function suggestEnvVars(mappings: PortMapping[]): Map<PortMapping, string> {
+  const taken = new Set(mappings.flatMap((m) => (m.envVar ? [m.envVar] : [])));
+  const out = new Map<PortMapping, string>();
+  for (const m of mappings) {
+    if (m.envVar !== null) continue;
+    const base = suggestEnvVar(m.serviceName);
+    let name = taken.has(base) ? base.replace(/_PORT$/, `_${m.containerPort}_PORT`) : base;
+    for (let n = 2; taken.has(name); n++) name = `${base}_${n}`;
+    taken.add(name);
+    out.set(m, name);
+  }
+  return out;
 }

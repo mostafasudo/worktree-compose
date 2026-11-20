@@ -7,6 +7,7 @@ import { getDockerfiles, resolveSyncEntries } from "../sync/files.js";
 import { getStatusPaths } from "../git/status.js";
 import { samePath } from "../git/worktree.js";
 import { forgetRecords } from "../state/registry.js";
+import { overridePath, removeOverride } from "../compose/override.js";
 import { reportContextWarnings, throwIfAborted } from "./compose.js";
 import { orphanSkipReason, sweepStaleResources, teardownStack } from "./teardown.js";
 import type { SweepResult, SweepRunner } from "./teardown.js";
@@ -382,6 +383,8 @@ export async function clean(
       (t) => tornDown.has(t.project) && (t.orphan !== null || removed.has(t.path)),
     );
     forgetRecords(ctx.repo.commonDir, forget.map((t) => t.project));
+    // A kept worktree keeps its runtime override: its env file still lists it.
+    for (const t of forget) removeOverride(overridePath(ctx.repo.commonDir, t.project));
     result.forgotten = forget.map((t) => t.path);
   }
 

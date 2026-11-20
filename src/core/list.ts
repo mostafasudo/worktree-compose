@@ -1,5 +1,7 @@
+import fs from "node:fs";
 import { buildContext } from "../context.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
+import { allocatableMappings, portsByLabel } from "../ports/allocate.js";
+import { stackAllocations, stackRemap } from "./compose.js";
 import { stackStatus } from "../compose/status.js";
 import type { StackStatus } from "../compose/status.js";
 import type { PortAllocation } from "../ports/types.js";
@@ -15,6 +17,10 @@ export interface ListRow {
   running: number | null;
   total: number | null;
   url: string | null;
+  /**
+   * Allocated host ports by variable — or by `<service>:<default port>` for
+   * hardcoded ports remapped at runtime.
+   */
   ports: Record<string, number>;
   /** The worktree was removed but its registry record (and maybe its stack) remains. */
   orphan: boolean;
@@ -28,18 +34,24 @@ export interface ListRow {
 
 export interface ListResult {
   rows: ListRow[];
-  /** Default (main checkout) ports of isolatable services. */
+  /** Default (main checkout) ports of isolated services, remapped hardcoded ones included. */
   mainPorts: { service: string; port: number }[];
   warnings: string[];
   isolationWarnings: string[];
 }
 
+/**
+ * A stack's ports as `start` allocates them, run from `dir` (its worktree,
+ * or the main checkout when the worktree is gone): read-only.
+ */
 function safeAllocate(
   ctx: ReturnType<typeof buildContext>,
   index: number,
+  dir: string,
+  project: string,
 ): PortAllocation[] {
   try {
-    return allocateWorktreePorts(ctx.portMappings, index, ctx.portStride);
+    return stackAllocations(ctx, index, stackRemap(ctx, dir, project).targets).allocations;
   } catch {
     return [];
   }
@@ -71,7 +83,7 @@ export function listWorktrees(io: CoreIo): ListResult {
 
   const rows: ListRow[] = [];
   for (const wt of ctx.worktrees) {
-    const allocations = safeAllocate(ctx, wt.index);
+    const allocations = safeAllocate(ctx, wt.index, wt.path, wt.project);
     const state = stacks.state(wt.project);
     rows.push({
       index: wt.index,
@@ -82,13 +94,13 @@ export function listWorktrees(io: CoreIo): ListResult {
       running: state?.running ?? null,
       total: state?.total ?? null,
       url: pickUrl(allocations),
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
       orphan: false,
       unavailable: null,
     });
   }
   for (const u of ctx.unavailable) {
-    const allocations = safeAllocate(ctx, u.index);
+    const allocations = safeAllocate(ctx, u.index, u.path, u.project);
     const state = stacks.state(u.project);
     rows.push({
       index: u.index,
@@ -99,13 +111,13 @@ export function listWorktrees(io: CoreIo): ListResult {
       running: state?.running ?? null,
       total: state?.total ?? null,
       url: null,
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
       orphan: false,
       unavailable: u.reason,
     });
   }
   for (const o of ctx.orphans) {
-    const allocations = safeAllocate(ctx, o.index);
+    const allocations = safeAllocate(ctx, o.index, fs.existsSync(o.path) ? o.path : ctx.repoRoot, o.project);
     const state = stacks.state(o.project);
     rows.push({
       index: o.index,
@@ -116,7 +128,7 @@ export function listWorktrees(io: CoreIo): ListResult {
       running: state?.running ?? null,
       total: state?.total ?? null,
       url: null,
-      ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
+      ports: portsByLabel(allocations),
       orphan: true,
       unavailable: null,
     });
@@ -127,9 +139,10 @@ export function listWorktrees(io: CoreIo): ListResult {
 
   return {
     rows,
-    mainPorts: ctx.portMappings
-      .filter((m) => m.envVar !== null)
-      .map((m) => ({ service: m.serviceName, port: m.defaultPort })),
+    mainPorts: allocatableMappings(ctx.portMappings, ctx.remap?.ports).map((m) => ({
+      service: m.serviceName,
+      port: m.defaultPort,
+    })),
     warnings,
     isolationWarnings: ctx.isolationWarnings,
   };

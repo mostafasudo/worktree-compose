@@ -7,7 +7,9 @@ import {
   composeIsolationWarnings,
   portCollisionWarnings,
   rawPortWarnings,
+  remapNotes,
 } from "./compose/isolation.js";
+import { decideRemap } from "./compose/override.js";
 import { extractPortMappings } from "./ports/extract.js";
 import { loadConfig } from "./config.js";
 import { assertMainCheckout, getRepoInfo, listRepoWorktrees } from "./git/repo.js";
@@ -16,8 +18,9 @@ import { hasRecord, peekState, reconcileWorktrees } from "./state/registry.js";
 import { escapeRegExp, sanitize } from "./utils/sanitize.js";
 import { resolveWorkspaces } from "./workspaces/resolve.js";
 import { resolveSyncEntries } from "./sync/files.js";
-import { DEFAULT_ENV_FILE } from "./sync/env.js";
+import { DEFAULT_ENV_FILE, findEnvSource } from "./sync/env.js";
 import type { ComposeEngine } from "./compose/engine.js";
+import type { RemapDecision, RemapTargets } from "./compose/override.js";
 import type { PsContainer, StackProbe } from "./compose/status.js";
 import type { ComposeFile } from "./compose/types.js";
 import type { PortMapping } from "./ports/types.js";
@@ -64,6 +67,12 @@ export interface BuildContextOptions {
    * of treating the current checkout as the main one.
    */
   requireMainFor?: string;
+  /**
+   * Decide runtime remapping of hardcoded ports and container_name (see
+   * compose/override.ts), which may probe the engine. Implied by
+   * `probeStacks`; set it for other commands that run compose on stacks.
+   */
+  resolveRemap?: boolean;
 }
 
 export interface WtcContext {
@@ -93,6 +102,14 @@ export interface WtcContext {
   warnings: string[];
   /** Settings that break isolation between worktree stacks. */
   isolationWarnings: string[];
+  /**
+   * Hardcoded host ports and fixed container names wtc remaps at runtime
+   * (only with `probeStacks` / `resolveRemap`); null when there are none or
+   * the engine cannot (the reason is among the isolation warnings).
+   */
+  remap: RemapTargets | null;
+  /** What runtime remapping does, for `wtc start` (informational). */
+  remapNotes: string[];
   /** Stack states (only with `probeStacks`). */
   stacks: StackProbe | null;
   /** Resolve the compose engine (lazily; throws when none is available). */
@@ -261,14 +278,39 @@ export function buildContext(
     );
   }
 
+  const decision: RemapDecision =
+    opts.probeStacks || opts.resolveRemap
+      ? decideRemap({
+          composeFile,
+          mappings: portMappings,
+          mainRoot: repoRoot,
+          commonDir: repo.commonDir,
+          envFiles: [
+            findEnvSource(repoRoot, { dir: "", label: "root", envFileName: config.envFile ?? DEFAULT_ENV_FILE }),
+            path.join(repoRoot, DEFAULT_ENV_FILE),
+          ],
+          envOverrides: config.envOverrides,
+          engine: getEngine,
+        })
+      : { targets: null, problem: null, warnings: [] };
+  const remap = decision.targets;
+  const remapped = remap?.ports ?? [];
+
   const isolationWarnings = [
-    ...rawPortWarnings(portMappings),
-    ...composeIsolationWarnings(composeFile),
-    ...portCollisionWarnings(portMappings, portStride, [
-      ...reconciled.worktrees.map((w) => w.index),
-      ...reconciled.orphans.map((o) => o.index),
-      ...reconciled.unavailable.map((u) => u.index),
-    ]),
+    ...(decision.problem ? [decision.problem] : []),
+    ...decision.warnings,
+    ...rawPortWarnings(portMappings, remapped),
+    ...composeIsolationWarnings(composeFile, new Set(remap?.containerNames.map((c) => c.service))),
+    ...portCollisionWarnings(
+      portMappings,
+      portStride,
+      [
+        ...reconciled.worktrees.map((w) => w.index),
+        ...reconciled.orphans.map((o) => o.index),
+        ...reconciled.unavailable.map((u) => u.index),
+      ],
+      remapped,
+    ),
   ];
 
   return {
@@ -287,6 +329,8 @@ export function buildContext(
     prunable,
     warnings,
     isolationWarnings,
+    remap,
+    remapNotes: remap ? remapNotes(remap, portMappings) : [],
     stacks,
     getEngine,
   };

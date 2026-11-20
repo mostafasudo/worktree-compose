@@ -1,8 +1,11 @@
 import {
+  allocatableMappings,
   allocatePort,
   allocateWorktreePorts,
   allocationEnv,
   detectCrossWorktreeCollisions,
+  portLabel,
+  portsByLabel,
   recommendPortStride,
 } from "../../src/ports/allocate.js";
 import type { PortMapping } from "../../src/ports/types.js";
@@ -65,12 +68,14 @@ describe("allocateWorktreePorts", () => {
       envVar: "POSTGRES_PORT",
       port: 25435,
       containerPort: 5432,
+      defaultPort: 5434,
     });
     expect(result[1]).toEqual({
       serviceName: "backend",
       envVar: "BACKEND_PORT",
       port: 28001,
       containerPort: 8000,
+      defaultPort: 8000,
     });
   });
 
@@ -174,5 +179,82 @@ describe("allocationEnv", () => {
 
   it("returns an empty object when nothing is allocatable", () => {
     expect(allocationEnv([])).toEqual({});
+  });
+});
+
+describe("allocation with runtime-remapped hardcoded ports", () => {
+  const declared: PortMapping = {
+    serviceName: "api",
+    envVar: "API_PORT",
+    defaultPort: 3000,
+    containerPort: 3000,
+    raw: "${API_PORT:-3000}:3000",
+  };
+  const web: PortMapping = { serviceName: "web", envVar: null, defaultPort: 8080, containerPort: 80, raw: "8080:80" };
+  const dnsTcp: PortMapping = { serviceName: "dns", envVar: null, defaultPort: 53, containerPort: 53, raw: "53:53/tcp" };
+  const dnsUdp: PortMapping = { serviceName: "dns", envVar: null, defaultPort: 53, containerPort: 53, raw: "53:53/udp" };
+  const range: PortMapping = {
+    serviceName: "ftp",
+    envVar: null,
+    defaultPort: 21000,
+    containerPort: 21000,
+    raw: "21000-21010:21000-21010",
+    range: true,
+  };
+
+  it("allocates remapped hardcoded ports with no variable, by their default port", () => {
+    const result = allocateWorktreePorts([declared, web], 2, 1, [web]);
+    expect(result).toEqual([
+      { serviceName: "api", envVar: "API_PORT", port: 23002, containerPort: 3000, defaultPort: 3000 },
+      { serviceName: "web", envVar: null, port: 28082, containerPort: 80, defaultPort: 8080 },
+    ]);
+    // Only the variable is exported to compose; the remapped port has none.
+    expect(allocationEnv(result)).toEqual({ API_PORT: "23002" });
+  });
+
+  it("gives one port to a host port published twice (tcp + udp) instead of failing", () => {
+    const result = allocateWorktreePorts([dnsTcp, dnsUdp], 1, 1, [dnsTcp, dnsUdp]);
+    expect(result.map((a) => [a.defaultPort, a.port])).toEqual([[53, 20054]]);
+  });
+
+  it("gives one port to a variable repeated with the same default (tcp + udp)", () => {
+    const tcp = { ...declared, raw: "${API_PORT:-3000}:3000/tcp" };
+    const udp = { ...declared, raw: "${API_PORT:-3000}:3000/udp" };
+    expect(allocateWorktreePorts([tcp, udp], 1)).toHaveLength(1);
+  });
+
+  it("keeps a variable with two different defaults as before: one allocation each, the last one exported", () => {
+    const other = { ...declared, defaultPort: 3001, raw: "${API_PORT:-3001}:3001" };
+    const result = allocateWorktreePorts([declared, other], 1);
+    expect(result.map((a) => a.port)).toEqual([23001, 23002]);
+    expect(allocationEnv(result)).toEqual({ API_PORT: "23002" });
+  });
+
+  it("leaves a hardcoded port with nowhere to move as it is, instead of failing", () => {
+    const high: PortMapping = { serviceName: "x", envVar: null, defaultPort: 65500, containerPort: 65500, raw: "65500:65500" };
+    expect(allocateWorktreePorts([declared, high], 1, 1, [high]).map((a) => a.serviceName)).toEqual(["api"]);
+    // A declared variable that cannot move still fails, as before.
+    expect(() => allocateWorktreePorts([{ ...high, envVar: "X_PORT" }], 1)).toThrow(/out of valid range/);
+    // And collision checks skip it rather than giving up.
+    expect(detectCrossWorktreeCollisions([web, high], 1, [1, 2], [web, high])).toEqual([]);
+  });
+
+  it("never allocates a remapped port whose default port a variable already covers, or a range", () => {
+    const sameDefault = { ...web, defaultPort: 3000, raw: "3000:3001" };
+    expect(allocatableMappings([declared, sameDefault, range], [sameDefault, range])).toEqual([declared]);
+  });
+
+  it("labels remapped ports <service>:<default port>", () => {
+    const result = allocateWorktreePorts([declared, web], 1, 1, [web]);
+    expect(result.map(portLabel)).toEqual(["API_PORT", "web:8080"]);
+    expect(portsByLabel(result)).toEqual({ API_PORT: 23001, "web:8080": 28081 });
+  });
+
+  it("includes remapped ports in cross-worktree collision detection", () => {
+    // 8080 and 8081 collide between adjacent worktrees at stride 1.
+    const other: PortMapping = { serviceName: "admin", envVar: null, defaultPort: 8081, containerPort: 81, raw: "8081:81" };
+    expect(detectCrossWorktreeCollisions([web, other], 1, [1, 2])).toEqual([]);
+    expect(detectCrossWorktreeCollisions([web, other], 1, [1, 2], [web, other])).toHaveLength(1);
+    expect(recommendPortStride([web, other], 2, [web, other])).toBeGreaterThan(1);
   });
 });
